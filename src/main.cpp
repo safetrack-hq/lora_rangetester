@@ -1,19 +1,35 @@
-#include "projdefs.h"
-#include "rtos.h"
-#include "services/BLEDis.h"
-#include "variant.h"
+// SDCARD_SS_PIN is defined for the built-in SD on some boards.
 #include <Arduino.h>
-#include <bluefruit.h>
-//#include <RadioLib.h>
+#include <SPI.h>
+#include <TinyGPSPlus.h>
+
+#define SD_FAT_TYPE 3
+#include <SdFat.h>
+
+#include <RadioLib.h>
+
 
 //SX1262 radio = new Module(SX126X_CS, SX126X_DIO1, SX126X_RESET, SX126X_BUSY);
-BLEDis bledis;
-BLEUart bleuart;
+
+constexpr uint8_t RX_GPS = 8;
+constexpr uint8_t TX_GPS = 9;
+
+TinyGPSPlus gps;
+
+struct gpsFix {
+	int32_t lat_E7;
+	int32_t lng_E7;
+	int16_t altM;
+	uint8_t sats;
+	bool valid;
+};
+
+gpsFix latestFix;
+SemaphoreHandle_t gpsMutex;
 
 void txTelemetry(void* parameter){
 	//broad cast telem over bleuart
 	while (1){
-		Serial.write("blah blah");
 		vTaskDelay(pdMS_TO_TICKS(1000));
 	}
 }
@@ -27,24 +43,33 @@ void blinkLED(void* parameter){
 	}
 }
 
+void writeLogTask(void* parameter){
+	while(1){
+		
+	}
+}
+
+void gpsPoll(void* parameter){
+	while(Serial1.available()){
+		if(gps.encode(Serial1.read())){
+			gpsFix fix;
+			fix.lat_E7 = (int32_t)(gps.location.lat() * 10000000.0);
+			fix.lng_E7 = (int32_t)(gps.location.lng() * 10000000.0);
+			fix.altM = (int16_t)(gps.altitude.meters() * 10000000.0);
+			fix.sats = (uint8_t)(gps.satellites.value());
+			xSemaphoreTake(&gpsMutex, portMAX_DELAY);
+			latestFix = fix;
+			xSemaphoreGive(&gpsMutex);
+		}
+	}
+}
+
 void setup(void){
 	Serial.begin(9600);
+	Serial1.setPins(RX_GPS, TX_GPS);
+	Serial1.begin(9600);
 	
-	//start bluefruit Config
-	Bluefruit.autoConnLed(true);
-	Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
-	Bluefruit.begin();
-	Bluefruit.setTxPower(4);
-	Bluefruit.Periph.setConnectCallback(ble_connect_callback);
-	Bluefruit.Periph.setDisconnectCallback(disconnect_callback);
-	Bluefruit.Periph.setConnInterval(6, 12); // apparently 7.5ms-12ms (this is recommendation, doesn't need to followed by host)
-	
-	bledis.setManufacturer("Joe");
-	bledis.setModel("LoRa Range Tester");
-
-	bleuart.setRxCallback(bleuart_rx_callback);
-	bleuart.setNotifyCallback(bleuart_notify_callback);
-	// end bluefruit config
+	gpsMutex = xSemaphoreCreateMutex();
 
 
 	pinMode(LED_BUILTIN, OUTPUT);
@@ -56,6 +81,16 @@ void setup(void){
 			NULL,
 			1,
 			NULL);
+
+	xTaskCreate(
+			writeLogTask,
+			"Write to Log",
+			2048,
+			NULL,
+			2,
+			NULL
+			);
+
 	xTaskCreate(
 			blinkLED,
 			"Blink LED",
@@ -63,8 +98,17 @@ void setup(void){
 			NULL,
 			1,
 			NULL);
+
+	xTaskCreate(
+			gpsPoll,
+			"Poll GPS",
+			1024,
+			NULL,
+			1,
+			NULL
+			);
 }
 
 void loop(void){
-
+	vTaskDelay(pdMS_TO_TICKS(100));
 }
