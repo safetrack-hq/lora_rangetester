@@ -83,11 +83,11 @@ extern "C"
 
 #define SPI_INTERFACES_COUNT 1
 
-#define PIN_SPI_MISO 47
-#define PIN_SPI_MOSI 45
-#define PIN_SPI_SCK 43
+#define PIN_SPI_MISO (0 + 2)
+#define PIN_SPI_MOSI (32 + 15)
+#define PIN_SPI_SCK (32 + 11)
 
-static const uint8_t SS   = 39 ;
+static const uint8_t SS   = 11;
 static const uint8_t MOSI = PIN_SPI_MOSI ;
 static const uint8_t MISO = PIN_SPI_MISO ;
 static const uint8_t SCK  = PIN_SPI_SCK ;
