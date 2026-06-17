@@ -14,7 +14,7 @@ import os
 import random
 import sys
 import textwrap
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import click
 
@@ -43,8 +43,8 @@ PRESETS = {
         'pattern': 'single', 'seed': 42,
     },
     'gaps': {
-        'count': 5, 'max_range_km': 2.0, 'gap_rate': 0.4,
-        'pattern': 'single', 'seed': 42,
+        'count': 20, 'max_range_km': 2.0, 'gap_rate': 0.25,
+        'pattern': 'single', 'seed': 1234,
     },
     'nofix': {
         'count': 4, 'max_range_km': 2.0, 'gap_rate': 0.0,
@@ -204,34 +204,11 @@ def _radial_routes(tx_lat, tx_lng, count, max_range_km, gps_noise_sigma):
     return pts
 
 
-# ── Gap Insertion ─────────────────────────────────────────────────────
-def insert_gaps(rx_points, gap_rate, drop_curve_km=None, max_range_km=None,
-                tx_lat=None, tx_lng=None):
-    kept = []
-    for pt in rx_points:
-        if drop_curve_km and max_range_km and max_range_km > 0 and tx_lat is not None:
-            dist_m = haversine(pt[0], pt[1], tx_lat, tx_lng)
-            dist_km = dist_m / 1000
-            threshold = drop_curve_km * 0.5
-            if dist_km > threshold:
-                t = (dist_km - threshold) / (drop_curve_km - threshold + 1e-6)
-                local_rate = 0.1 + 0.9 * min(t, 1.0)
-                if random.random() < local_rate:
-                    continue
-            else:
-                if random.random() < gap_rate:
-                    continue
-        else:
-            if random.random() < gap_rate:
-                continue
-        kept.append(pt)
-    return kept
-
-
-# ── Row Generation ───────────────────────────────────────────────────
+# ── Row Generation (with gap support) ────────────────────────────────
 def generate_rows(rx_points, tx_lat, tx_lng, f_mhz, ptx, gt, gr, loss,
                   beacon_interval, start_utc, rssi_sigma=3.0, snr_sigma=2.0,
-                  noise_floor=NOISE_FLOOR_DEFAULT):
+                  noise_floor=NOISE_FLOOR_DEFAULT,
+                  gap_rate=0.0, drop_curve_km=None, max_range_km=None):
     rows = []
     pid = 1
     time_us = 0
@@ -241,29 +218,43 @@ def generate_rows(rx_points, tx_lat, tx_lng, f_mhz, ptx, gt, gr, loss,
         dist_m = haversine(tx_lat, tx_lng, rx_lat, rx_lng)
         d_km = dist_m / 1000
 
+        # Decide whether to drop this packet (simulate loss)
+        drop = False
+        if drop_curve_km and max_range_km and max_range_km > 0:
+            threshold = drop_curve_km * 0.5
+            if d_km > threshold:
+                t = (d_km - threshold) / (drop_curve_km - threshold + 1e-6)
+                local_rate = 0.1 + 0.9 * min(t, 1.0)
+                if random.random() < local_rate:
+                    drop = True
+        if not drop and gap_rate > 0:
+            if random.random() < gap_rate:
+                drop = True
+
+        # Compute RSSI/SNR (even for dropped packets, for internal use — but we skip output)
         if d_km > 0:
             rssi = rssi_at_distance(d_km, f_mhz, ptx, gt, gr, loss)
             rssi += random.gauss(0, rssi_sigma)
         else:
             rssi = -30 + random.gauss(0, rssi_sigma)
 
-        snr = snr_from_rssi(rssi, noise_floor, snr_sigma)
-
-        rows.append({
-            'event_time_us': time_us,
-            'time_valid': 1,
-            'utc_iso': dt.strftime('%Y-%m-%dT%H:%M:%SZ'),
-            'event_type': 2,
-            'node_id': 1,
-            'packet_id': pid,
-            'lat_e7': lat_to_e7(rx_lat),
-            'lng_e7': lng_to_e7(rx_lng),
-            'gps_fix_time_us': time_us,
-            'rssi_dbm': round(rssi, 1),
-            'snr_db': round(snr, 1),
-            'tx_lat_e7': lat_to_e7(tx_lat),
-            'tx_lng_e7': lng_to_e7(tx_lng),
-        })
+        if not drop:
+            snr = snr_from_rssi(rssi, noise_floor, snr_sigma)
+            rows.append({
+                'event_time_us': time_us,
+                'time_valid': 1,
+                'utc_iso': dt.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'event_type': 2,
+                'node_id': 1,
+                'packet_id': pid,
+                'lat_e7': lat_to_e7(rx_lat),
+                'lng_e7': lng_to_e7(rx_lng),
+                'gps_fix_time_us': time_us,
+                'rssi_dbm': round(rssi, 1),
+                'snr_db': round(snr, 1),
+                'tx_lat_e7': lat_to_e7(tx_lat),
+                'tx_lng_e7': lng_to_e7(tx_lng),
+            })
 
         pid += 1
         time_us += int(beacon_interval * 1e6)
@@ -535,6 +526,18 @@ def _main(interactive, preset, tx_lat, tx_lng, location, count, max_range,
 
     else:
         # ── Direct flags / preset ─────────────────────────────────────
+        params = {
+            'tx_lat': tx_lat, 'tx_lng': tx_lng,
+            'count': count, 'max_range': max_range,
+            'pattern': pattern, 'gap_rate': gap_rate,
+            'drop_curve': drop_curve,
+            'tx_power': tx_power, 'tx_gain': tx_gain, 'rx_gain': rx_gain,
+            'cable_loss': cable_loss, 'freq': freq,
+            'gps_noise': gps_noise, 'rssi_sigma': rssi_sigma,
+            'snr_sigma': snr_sigma, 'beacon': beacon,
+            'nofix': nofix, 'seed': seed,
+        }
+
         if location:
             click.echo('→ Geocoding location...')
             geo = geocode_location(location)
@@ -545,8 +548,8 @@ def _main(interactive, preset, tx_lat, tx_lng, location, count, max_range,
                 click.echo('→ Geocoding failed, using Tempe AZ')
                 cfg['tx_lat'], cfg['tx_lng'] = DEFAULT_TX_LAT, DEFAULT_TX_LNG
         else:
-            cfg['tx_lat'] = tx_lat if tx_lat is not None else DEFAULT_TX_LAT
-            cfg['tx_lng'] = tx_lng if tx_lng is not None else DEFAULT_TX_LNG
+            cfg['tx_lat'] = params['tx_lat'] if params['tx_lat'] is not None else DEFAULT_TX_LAT
+            cfg['tx_lng'] = params['tx_lng'] if params['tx_lng'] is not None else DEFAULT_TX_LNG
 
         for key, attr in [
             ('count', 'count'), ('max_range_km', 'max_range'),
@@ -558,7 +561,7 @@ def _main(interactive, preset, tx_lat, tx_lng, location, count, max_range,
             ('snr_sigma', 'snr_sigma'), ('beacon', 'beacon'),
             ('nofix', 'nofix'), ('seed', 'seed'),
         ]:
-            val = kwargs.get(attr)
+            val = params.get(attr)
             if val is not None:
                 cfg[key] = val
 
@@ -589,7 +592,7 @@ def _main(interactive, preset, tx_lat, tx_lng, location, count, max_range,
     cfg.setdefault('snr_sigma', 2.0)
     cfg.setdefault('beacon', BEACON_INTERVAL_DEFAULT)
     cfg.setdefault('nofix', 0)
-    cfg.setdefault('start_utc', datetime.utcnow())
+    cfg.setdefault('start_utc', datetime.now(timezone.utc).replace(tzinfo=None))
     cfg.setdefault('out', default_outpath(cfg['count'], cfg['tx_lat'], cfg['tx_lng']))
     cfg.setdefault('no_summary', no_summary)
     if cfg.get('seed') is not None:
@@ -604,11 +607,6 @@ def _main(interactive, preset, tx_lat, tx_lng, location, count, max_range,
         gps_noise_sigma=cfg['gps_noise']
     )
 
-    rx_points = insert_gaps(
-        rx_points, cfg['gap_rate'], cfg['drop_curve'],
-        cfg['max_range_km'], cfg['tx_lat'], cfg['tx_lng']
-    )
-
     rows = generate_rows(
         rx_points,
         cfg['tx_lat'], cfg['tx_lng'],
@@ -616,7 +614,10 @@ def _main(interactive, preset, tx_lat, tx_lng, location, count, max_range,
         cfg['rx_gain'], cfg['cable_loss'],
         cfg['beacon'], cfg['start_utc'],
         rssi_sigma=cfg['rssi_sigma'],
-        snr_sigma=cfg['snr_sigma']
+        snr_sigma=cfg['snr_sigma'],
+        gap_rate=cfg['gap_rate'],
+        drop_curve_km=cfg['drop_curve'],
+        max_range_km=cfg['max_range_km'],
     )
 
     if cfg['nofix'] > 0 and rows:

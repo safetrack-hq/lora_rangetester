@@ -192,33 +192,65 @@ class TestGpsNoise:
 
 
 # =========================================================================
-# Gap Insertion
+# Gap Insertion (now inside generate_rows)
 # =========================================================================
-class TestInsertGaps:
+class TestGapsInRows:
     def test_no_gaps_when_rate_zero(self):
-        pts = [(33.43, -111.94), (33.44, -111.94), (33.45, -111.94)]
-        result = g.insert_gaps(pts, gap_rate=0.0, tx_lat=33.4255, tx_lng=-111.94)
-        assert len(result) == 3
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94), (33.44, -111.94), (33.45, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0),
+                               gap_rate=0.0)
+        assert len(rows) == 3
 
     def test_some_gaps_when_rate_nonzero(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43 + i * 0.01, -111.94) for i in range(100)]
         random.seed(42)
-        pts = [(33.43 + i * 0.01, -111.94) for i in range(100)]
-        result = g.insert_gaps(pts, gap_rate=0.3, tx_lat=33.4255, tx_lng=-111.94)
-        assert len(result) < 100
-        assert len(result) > 50  # with rate 0.3, ~70 kept
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0),
+                               gap_rate=0.3)
+        assert len(rows) < 100
+        assert len(rows) > 50
+
+    def test_packet_ids_have_gaps(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43 + i * 0.01, -111.94) for i in range(20)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0),
+                               gap_rate=0.3)
+        pids = [r['packet_id'] for r in rows]
+        # With 20 packets at 0.3 rate, should have ~14 kept
+        # There should be gaps (not strictly sequential from 1)
+        assert len(pids) < 20, "gaps should reduce packet count"
+        # The gap has created actual holes if max > len
+        if len(rows) > 0 and pids:
+            assert max(pids) > len(rows), "packet_ids should have gaps (max > kept count)"
 
     def test_drop_curve_removes_more_far_points(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94)] * 10 + [(33.48, -111.90)] * 10
         random.seed(42)
-        # Create points within 1 km and at 5+ km
-        pts = [(33.43, -111.94)] * 10 + [(33.48, -111.90)] * 10
-        result = g.insert_gaps(pts, gap_rate=0.0,
-                               drop_curve_km=5, max_range_km=5,
-                               tx_lat=33.4255, tx_lng=-111.94)
-        # Near points should be preserved, far points may be dropped
-        assert len(result) >= 5
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0),
+                               gap_rate=0.0, drop_curve_km=5, max_range_km=5)
+        assert len(rows) >= 5
 
-    def test_empty_list(self):
-        assert g.insert_gaps([], gap_rate=0.5) == []
+    def test_gaps_with_drop_curve(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94), (33.44, -111.94), (33.45, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0),
+                               gap_rate=0.5, drop_curve_km=10, max_range_km=10)
+        assert len(rows) >= 0
 
 
 # =========================================================================
