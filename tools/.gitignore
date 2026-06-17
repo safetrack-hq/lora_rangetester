@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+fixtures/*.csv
+!fixtures/.gitkeep
