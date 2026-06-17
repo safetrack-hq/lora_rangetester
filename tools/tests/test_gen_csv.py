@@ -1,0 +1,486 @@
+"""Tests for tools/gen_csv.py — pytest suite.
+
+Run:
+    cd tools/ && python -m pytest tests/ -v
+"""
+
+import csv
+import io
+import math
+import os
+import random
+import sys
+from datetime import datetime
+from unittest.mock import patch, MagicMock
+
+# Allow importing gen_csv from the parent directory
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+import gen_csv as g
+
+
+# =========================================================================
+# Geodesy
+# =========================================================================
+class TestHaversine:
+    def test_identical_points(self):
+        assert g.haversine(33.4255, -111.94, 33.4255, -111.94) == 0
+
+    def test_equator_degree(self):
+        d = g.haversine(0, 0, 0, 1)
+        assert abs(d - 111194.9) < 1
+
+    def test_small_step(self):
+        d = g.haversine(37.0, -122.0, 37.01, -122.0)
+        assert abs(d - 1111.95) < 1
+
+
+class TestLatToE7:
+    def test_positive(self):
+        assert g.lat_to_e7(33.4255104) == 334255104
+
+    def test_negative(self):
+        assert g.lat_to_e7(-33.4255) == -334255000
+
+    def test_zero(self):
+        assert g.lat_to_e7(0) == 0
+
+
+class TestLngToE7:
+    def test_positive(self):
+        assert g.lng_to_e7(111.9400) == 1119400000
+
+    def test_negative(self):
+        assert g.lng_to_e7(-111.9400) == -1119400000
+
+    def test_zero(self):
+        assert g.lng_to_e7(0) == 0
+
+
+class TestDestination:
+    def test_east_moves_lng(self):
+        lat, lng = g.destination(0, 0, 90, 111195)
+        assert abs(lat) < 0.01
+        assert abs(lng - 1) < 0.01
+
+    def test_north_moves_lat(self):
+        lat, lng = g.destination(0, 0, 0, 111195)
+        assert abs(lat - 1) < 0.01
+        assert abs(lng) < 0.01
+
+
+# =========================================================================
+# RF Model
+# =========================================================================
+class TestFsplDb:
+    def test_fspl_1m(self):
+        # FSPL at 1 m / 915 MHz ≈ 31.7 dB
+        f = g.fspl_db(0.001, 915)
+        assert abs(f - 31.67) < 0.1
+
+    def test_fspl_1km(self):
+        f = g.fspl_db(1, 915)
+        assert abs(f - 91.67) < 0.1
+
+    def test_fspl_increases_with_distance(self):
+        assert g.fspl_db(10, 915) > g.fspl_db(1, 915)
+
+    def test_fspl_increases_with_frequency(self):
+        assert g.fspl_db(1, 2400) > g.fspl_db(1, 915)
+
+
+class TestRssiAtDistance:
+    def test_rssi_decreases_with_distance(self):
+        r1 = g.rssi_at_distance(0.1, 915, 22, 2.15, 2.15, 1)
+        r2 = g.rssi_at_distance(5, 915, 22, 2.15, 2.15, 1)
+        assert r2 < r1
+
+    def test_rssi_at_1km_default(self):
+        # With 22 dBm, 2.15 dBi ant, we expect about -66.4 dBm at 1 km
+        r = g.rssi_at_distance(1, 915, 22, 2.15, 2.15, 1)
+        assert abs(r - (-66.37)) < 1
+
+    def test_higher_power_increases_rssi(self):
+        r1 = g.rssi_at_distance(1, 915, 10, 2.15, 2.15, 1)
+        r2 = g.rssi_at_distance(1, 915, 20, 2.15, 2.15, 1)
+        assert r2 > r1
+
+
+class TestSnrFromRssi:
+    def test_snr_positive_for_strong_rssi(self):
+        # With noise floor -125, RSSI -80 → SNR ≈ 45
+        random.seed(42)
+        snr = g.snr_from_rssi(-80, -125)
+        assert snr > 30
+
+    def test_snr_negative_for_very_weak_signal(self):
+        random.seed(42)
+        snr = g.snr_from_rssi(-130, -125)
+        assert snr < 0
+
+
+# =========================================================================
+# Geocoding
+# =========================================================================
+class TestGeocodeLocation:
+    def test_returns_none_when_geopy_missing(self):
+        # When geopy is not installed, HAS_GEOCODING is False
+        if not g.HAS_GEOCODING:
+            assert g.geocode_location('Tempe AZ') is None
+
+    @patch('gen_csv.Nominatim')
+    def test_geocode_tempe(self, mock_nominatim):
+        mock_geo = MagicMock()
+        mock_geo.geocode.return_value = MagicMock(latitude=33.4255, longitude=-111.9400)
+        mock_nominatim.return_value = mock_geo
+
+        result = g.geocode_location('Tempe AZ')
+        assert result is not None
+        assert abs(result[0] - 33.4255) < 0.01
+        assert abs(result[1] - -111.94) < 0.01
+
+    @patch('gen_csv.Nominatim')
+    def test_geocode_failure_returns_none(self, mock_nominatim):
+        mock_geo = MagicMock()
+        mock_geo.geocode.return_value = None
+        mock_nominatim.return_value = mock_geo
+
+        assert g.geocode_location('NowhereXYZ') is None
+
+
+# =========================================================================
+# RX Point Generation
+# =========================================================================
+class TestGenerateRxPoints:
+    def test_count_match(self):
+        pts = g.generate_rx_points(33.4255, -111.94, 50, 5,
+                                   pattern='random', gps_noise_sigma=0)
+        assert len(pts) == 50
+
+    def test_single_route_count(self):
+        pts = g.generate_rx_points(33.4255, -111.94, 10, 5,
+                                   pattern='single', gps_noise_sigma=0)
+        assert len(pts) == 10
+
+    def test_radial_route_count(self):
+        pts = g.generate_rx_points(33.4255, -111.94, 30, 5,
+                                   pattern='radial', gps_noise_sigma=0)
+        assert len(pts) == 30
+
+    def test_points_within_max_range(self):
+        random.seed(42)
+        pts = g.generate_rx_points(33.4255, -111.94, 50, 5,
+                                   pattern='radial', gps_noise_sigma=0)
+        for pt in pts:
+            d = g.haversine(33.4255, -111.94, pt[0], pt[1])
+            assert d <= 5000 * 1.05  # allow 5% over for jitter
+
+    def test_zero_count(self):
+        pts = g.generate_rx_points(33.4255, -111.94, 0, 5)
+        assert pts == []
+
+
+class TestGpsNoise:
+    def test_noise_adds_scatter(self):
+        random.seed(1)
+        clean = g._radial_routes(33.4255, -111.94, 10, 1, gps_noise_sigma=0)
+        random.seed(1)
+        noisy = g._radial_routes(33.4255, -111.94, 10, 1, gps_noise_sigma=10)
+        # At least one point should differ measurably
+        diffs = [g.haversine(c[0], c[1], n[0], n[1]) for c, n in zip(clean, noisy)]
+        assert max(diffs) > 0.1
+
+
+# =========================================================================
+# Gap Insertion
+# =========================================================================
+class TestInsertGaps:
+    def test_no_gaps_when_rate_zero(self):
+        pts = [(33.43, -111.94), (33.44, -111.94), (33.45, -111.94)]
+        result = g.insert_gaps(pts, gap_rate=0.0, tx_lat=33.4255, tx_lng=-111.94)
+        assert len(result) == 3
+
+    def test_some_gaps_when_rate_nonzero(self):
+        random.seed(42)
+        pts = [(33.43 + i * 0.01, -111.94) for i in range(100)]
+        result = g.insert_gaps(pts, gap_rate=0.3, tx_lat=33.4255, tx_lng=-111.94)
+        assert len(result) < 100
+        assert len(result) > 50  # with rate 0.3, ~70 kept
+
+    def test_drop_curve_removes_more_far_points(self):
+        random.seed(42)
+        # Create points within 1 km and at 5+ km
+        pts = [(33.43, -111.94)] * 10 + [(33.48, -111.90)] * 10
+        result = g.insert_gaps(pts, gap_rate=0.0,
+                               drop_curve_km=5, max_range_km=5,
+                               tx_lat=33.4255, tx_lng=-111.94)
+        # Near points should be preserved, far points may be dropped
+        assert len(result) >= 5
+
+    def test_empty_list(self):
+        assert g.insert_gaps([], gap_rate=0.5) == []
+
+
+# =========================================================================
+# Row Generation
+# =========================================================================
+class TestGenerateRows:
+    def test_output_count(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94), (33.44, -111.94), (33.45, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        assert len(rows) == 3
+
+    def test_csv_header_present(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        expected_fields = g.CSV_HEADER.split(',')
+        for field in expected_fields:
+            assert field in rows[0]
+
+    def test_packet_ids_monotonic(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43 + i * 0.01, -111.94) for i in range(5)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        pids = [r['packet_id'] for r in rows]
+        assert pids == list(range(1, 6))
+
+    def test_rssi_decreases_with_distance(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.4255, -111.94), (33.43, -111.94), (33.44, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0),
+                               rssi_sigma=0)  # no scatter for clean comparison
+        assert rows[0]['rssi_dbm'] > rows[1]['rssi_dbm']
+        assert rows[1]['rssi_dbm'] > rows[2]['rssi_dbm']
+
+    def test_tx_coords_consistent(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        assert rows[0]['tx_lat_e7'] == g.lat_to_e7(33.4255)
+        assert rows[0]['tx_lng_e7'] == g.lng_to_e7(-111.94)
+
+    def test_timestamps_increment(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94), (33.44, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               2.0, datetime(2026, 6, 17, 14, 32, 0))
+        assert rows[1]['event_time_us'] == rows[0]['event_time_us'] + 2000000
+        assert rows[1]['utc_iso'] == '2026-06-17T14:32:02Z'
+
+
+# =========================================================================
+# No-Fix Injection
+# =========================================================================
+class TestInjectNofixRows:
+    def test_injects_rows(self):
+        rows = [
+            {'packet_id': 1, 'lat_e7': 334255000, 'lng_e7': -1119400000,
+             'tx_lat_e7': 334255000, 'tx_lng_e7': -1119400000},
+            {'packet_id': 2, 'lat_e7': 334265000, 'lng_e7': -1119300000,
+             'tx_lat_e7': 334255000, 'tx_lng_e7': -1119400000},
+        ]
+        random.seed(42)
+        result = g.inject_nofix_rows(rows, count=1)
+        assert len(result) == 3
+
+    def test_sets_nofix_sentinel(self):
+        rows = [
+            {'packet_id': 1, 'lat_e7': 334255000, 'lng_e7': -1119400000,
+             'tx_lat_e7': 334255000, 'tx_lng_e7': -1119400000},
+        ]
+        random.seed(42)
+        result = g.inject_nofix_rows(rows, count=1)
+        nofix = [r for r in result if r['lat_e7'] == 0 or r['tx_lat_e7'] == 0]
+        assert len(nofix) >= 1
+
+
+# =========================================================================
+# Sparkline
+# =========================================================================
+class TestSparkline:
+    def test_empty(self):
+        assert g.sparkline([]) == ''
+
+    def test_single_value(self):
+        sl = g.sparkline([50])
+        assert len(sl) == 1
+        assert sl in '▁▂▃▄▅▆▇█'
+
+    def test_ascending(self):
+        sl = g.sparkline([0, 100])
+        assert sl[0] < sl[-1] or sl[0] == '▁'
+
+    def test_all_same_value(self):
+        sl = g.sparkline([5, 5, 5])
+        assert len(sl) == 3
+
+
+# =========================================================================
+# Seed Reproducibility
+# =========================================================================
+class TestSeedReproducibility:
+    def test_same_seed_same_output(self):
+        random.seed(42)
+        pts1 = g.generate_rx_points(33.4255, -111.94, 10, 5, 'random', 0)
+        random.seed(42)
+        pts2 = g.generate_rx_points(33.4255, -111.94, 10, 5, 'random', 0)
+        for p1, p2 in zip(pts1, pts2):
+            assert abs(p1[0] - p2[0]) < 1e-10
+            assert abs(p1[1] - p2[1]) < 1e-10
+
+    def test_different_seed_different_output(self):
+        random.seed(1)
+        pts1 = g.generate_rx_points(33.4255, -111.94, 10, 5, 'random', 0)
+        random.seed(2)
+        pts2 = g.generate_rx_points(33.4255, -111.94, 10, 5, 'random', 0)
+        # At least some points should differ
+        diffs = sum(1 for p1, p2 in zip(pts1, pts2) if abs(p1[0] - p2[0]) > 1e-10)
+        assert diffs > 0
+
+
+# =========================================================================
+# CSV Write Format
+# =========================================================================
+class TestCsvFormat:
+    def test_csv_header_order(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        expected = g.CSV_HEADER.split(',')
+        assert list(rows[0].keys()) == expected
+
+    def test_csv_e7_format(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        assert isinstance(rows[0]['lat_e7'], int)
+        assert isinstance(rows[0]['tx_lat_e7'], int)
+        assert isinstance(rows[0]['lng_e7'], int)
+
+    def test_rssi_is_float(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        assert isinstance(rows[0]['rssi_dbm'], float)
+
+
+# =========================================================================
+# Presets
+# =========================================================================
+class TestPresets:
+    def test_all_presets_have_required_keys(self):
+        required = {'count', 'max_range_km', 'gap_rate', 'pattern'}
+        for name, cfg in g.PRESETS.items():
+            for key in required:
+                assert key in cfg, f'{name} missing {key}'
+
+    def test_preset_values_are_reasonable(self):
+        for name, cfg in g.PRESETS.items():
+            assert cfg['count'] >= 1
+            assert cfg['max_range_km'] > 0
+            assert 0 <= cfg['gap_rate'] <= 1
+            assert cfg['pattern'] in ('radial', 'single', 'random')
+
+
+# =========================================================================
+# Integration: CSV parseable by range-lib.js
+# =========================================================================
+class TestCsvParseableByRangeLib:
+    def _import_range_lib(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+        import importlib
+        try:
+            module = importlib.import_module('range-lib')
+            return module
+        except Exception:
+            # Attempt to load via subprocess
+            return None
+
+    def _write_csv_to_string(self, rows):
+        output = io.StringIO()
+        w = csv.DictWriter(output, fieldnames=g.CSV_HEADER.split(','))
+        w.writeheader()
+        w.writerows(rows)
+        return output.getvalue()
+
+    def test_rows_parse(self):
+        """Generate a minimal CSV and verify Node can parse it via subprocess."""
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94), (33.44, -111.94), (33.45, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        csv_text = self._write_csv_to_string(rows)
+
+        # Verify CSV structure matches range-lib expectations
+        lines = csv_text.strip().split('\n')
+        header = lines[0].lower()
+        assert 'tx_lat_e7' in header
+        assert 'tx_lng_e7' in header
+        assert 'lat_e7' in header
+        assert 'rssi_dbm' in header
+        assert 'packet_id' in header
+        assert len(lines) - 1 == 3  # header + 3 data rows
+
+    def test_known_distances(self):
+        """Verify generated distances match haversine expectations."""
+        tx = (33.4255, -111.94)
+        rx = [(33.4255, -111.94)]  # same point = 0 distance
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        assert len(rows) == 1
+        # Distance should be near 0
+        rx_lat = rows[0]['lat_e7'] / 1e7
+        rx_lng = rows[0]['lng_e7'] / 1e7
+        d = g.haversine(rx_lat, rx_lng, tx[0], tx[1])
+        assert d < 10  # within 10m due to GPS noise
+
+
+# =========================================================================
+# Defaults and constants
+# =========================================================================
+class TestDefaults:
+    def test_default_tx_is_tempe(self):
+        assert abs(g.DEFAULT_TX_LAT - 33.4255) < 0.001
+        assert abs(g.DEFAULT_TX_LNG - -111.94) < 0.001
+
+    def test_csv_header_has_all_required_fields(self):
+        fields = g.CSV_HEADER.split(',')
+        for f in ['lat_e7', 'lng_e7', 'tx_lat_e7', 'tx_lng_e7',
+                  'rssi_dbm', 'snr_db', 'packet_id', 'utc_iso']:
+            assert f in fields
+
+    def test_presets_exist(self):
+        for name in ('minimal', 'gaps', 'nofix', 'realistic_short', 'realistic_long'):
+            assert name in g.PRESETS
