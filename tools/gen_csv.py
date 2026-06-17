@@ -10,10 +10,7 @@ Usage:
 
 import csv
 import math
-import os
 import random
-import sys
-import textwrap
 from datetime import datetime, timedelta, timezone
 
 import click
@@ -48,15 +45,15 @@ PRESETS = {
     },
     'nofix': {
         'count': 4, 'max_range_km': 2.0, 'gap_rate': 0.0,
-        'pattern': 'single', 'seed': 42,
+        'pattern': 'single', 'seed': 42, 'nofix': 2,
     },
     'realistic_short': {
         'count': 50, 'max_range_km': 2.0, 'gap_rate': 0.1,
-        'pattern': 'radial', 'seed': None,
+        'pattern': 'radial', 'seed': 100,
     },
     'realistic_long': {
         'count': 80, 'max_range_km': 8.0, 'gap_rate': 0.15,
-        'pattern': 'radial', 'seed': None,
+        'pattern': 'radial', 'seed': 200,
     },
 }
 
@@ -266,28 +263,29 @@ def generate_rows(rx_points, tx_lat, tx_lng, f_mhz, ptx, gt, gr, loss,
 def inject_nofix_rows(rows, count=1):
     if not rows:
         return rows
-    nofix_indices = random.sample(range(len(rows)), min(count, len(rows)))
-    for idx in sorted(nofix_indices, reverse=True):
+    nofix_indices = sorted(random.sample(range(len(rows)), min(count, len(rows))))
+    for idx in nofix_indices:
         is_tx = random.random() < 0.5
-        r = dict(rows[idx])
         if is_tx:
-            r['tx_lat_e7'] = 0
-            r['tx_lng_e7'] = 0
+            rows[idx]['tx_lat_e7'] = 0
+            rows[idx]['tx_lng_e7'] = 0
         else:
-            r['lat_e7'] = 0
-            r['lng_e7'] = 0
-        rows.insert(idx + 1, r)
+            rows[idx]['lat_e7'] = 0
+            rows[idx]['lng_e7'] = 0
     return rows
 
 
 # ── Sparkline ─────────────────────────────────────────────────────────
-def sparkline(values):
+def sparkline(values, max_width=80):
     if not values:
         return ''
+    if len(values) > max_width:
+        step = max(1, len(values) // max_width)
+        values = values[::step][:max_width]
     mn, mx = min(values), max(values)
     span = mx - mn
     if span == 0:
-        return SPARKLINE_CHARS[len(SPARKLINE_CHARS) // 2] * min(len(values), 40)
+        return SPARKLINE_CHARS[len(SPARKLINE_CHARS) // 2] * len(values)
     nb = len(SPARKLINE_CHARS)
     norm = [(v - mn) / span for v in values]
     return ''.join(SPARKLINE_CHARS[min(int(v * nb), nb - 1)] for v in norm)
@@ -331,10 +329,10 @@ def ascii_map(tx_lat, tx_lng, rx_points, width=40, height=14):
 
     to_grid(tx_lat, tx_lng, '⊕')
     for pt in rx_points:
-        if grid[max(0, min(int((lat_max - pt[0]) / lat_span * (h - 1)) if lat_span > 0 else 0, h - 1))] \
-               [max(0, min(int((pt[1] - lng_min) / lng_span * (width - 1)) if lng_span > 0 else 0, width - 1))] != '⊕':
-            pass
-        to_grid(pt[0], pt[1], '·')
+        y = max(0, min(int((lat_max - pt[0]) / lat_span * (h - 1)) if lat_span > 0 else 0, h - 1))
+        x = max(0, min(int((pt[1] - lng_min) / lng_span * (width - 1)) if lng_span > 0 else 0, width - 1))
+        if grid[y][x] != '⊕':
+            to_grid(pt[0], pt[1], '·')
 
     lines = [''.join(row) for row in grid]
     return '\n'.join(lines)
@@ -390,7 +388,7 @@ def default_outpath(count, tx_lat, tx_lng):
 @click.option('--rssi-sigma', type=float, default=None, help='RSSI scatter sigma (dB)')
 @click.option('--snr-sigma', type=float, default=None, help='SNR scatter sigma (dB)')
 @click.option('--beacon', type=float, default=None, help='Beacon interval (s)')
-@click.option('--nofix', type=int, default=0, help='Number of no-fix sentinel rows to inject')
+@click.option('--nofix', type=int, default=None, help='Number of no-fix sentinel rows to inject')
 @click.option('--start-utc', type=str, default=None,
               help='Start datetime (YYYY-MM-DDTHH:MM:SS)')
 @click.option('--out', type=str, default=None, help='Output CSV path')
@@ -416,6 +414,8 @@ def _main(interactive, preset, tx_lat, tx_lng, location, count, max_range,
         cfg['pattern'] = p['pattern']
         if p.get('seed') is not None:
             cfg['seed'] = p['seed']
+        if 'nofix' in p:
+            cfg['nofix'] = p['nofix']
 
     # ── Interactive mode ──────────────────────────────────────────────
     if interactive:

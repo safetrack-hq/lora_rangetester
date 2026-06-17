@@ -323,7 +323,7 @@ class TestGenerateRows:
 # No-Fix Injection
 # =========================================================================
 class TestInjectNofixRows:
-    def test_injects_rows(self):
+    def test_modifies_rows_in_place(self):
         rows = [
             {'packet_id': 1, 'lat_e7': 334255000, 'lng_e7': -1119400000,
              'tx_lat_e7': 334255000, 'tx_lng_e7': -1119400000},
@@ -332,7 +332,11 @@ class TestInjectNofixRows:
         ]
         random.seed(42)
         result = g.inject_nofix_rows(rows, count=1)
-        assert len(result) == 3
+        # Function modifies in-place, returns same list (length unchanged)
+        assert len(result) == len(rows)
+        # At least one row should now have zeroed coords
+        nofix = [r for r in result if r['lat_e7'] == 0 or r['tx_lat_e7'] == 0]
+        assert len(nofix) >= 1
 
     def test_sets_nofix_sentinel(self):
         rows = [

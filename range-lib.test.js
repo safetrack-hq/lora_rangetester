@@ -269,16 +269,23 @@ test('fixture: gaps — drop rows produce gaps in packet_ids', () => {
 test('fixture: nofix — no-fix rows are dropped by processRows', () => {
   const csv = loadFixture('nofix');
   const { idx, rows } = RL.parseCSV(csv);
-  const pts = RL.processRows(idx, rows, null);
-  // Some rows may be RX or TX no-fix and get dropped
-  const kept = pts.length;
-  const raw = rows.length;
-  assert.ok(kept <= raw, 'processed point count must not exceed raw row count');
-  // At least one row should be valid
-  if (kept > 0) {
-    const s = RL.summarize(pts);
-    assert.ok(s.count > 0);
+  // Verify no-fix sentinel rows exist in raw CSV
+  let nofixRaw = 0;
+  for (const r of rows) {
+    const rxLat = parseInt(r[idx['lat_e7']]) / 1e7;
+    const rxLng = parseInt(r[idx['lng_e7']]) / 1e7;
+    const txLat = parseInt(r[idx['tx_lat_e7']]) / 1e7;
+    const txLng = parseInt(r[idx['tx_lng_e7']]) / 1e7;
+    if ((rxLat === 0 && rxLng === 0) || (txLat === 0 && txLng === 0)) nofixRaw++;
   }
+  assert.ok(nofixRaw > 0, 'nofix fixture must contain at least one (0,0) sentinel row');
+
+  const pts = RL.processRows(idx, rows, null);
+  // processRows should drop (0,0) rows, so processed count < raw count
+  assert.ok(pts.length < rows.length, 'processed points must be fewer than raw rows (no-fix rows dropped)');
+  const s = RL.summarize(pts);
+  assert.ok(s !== null);
+  assert.ok(s.count > 0);
 });
 
 test('fixture: all preset CSVs have consistent dual-GPS header', () => {
