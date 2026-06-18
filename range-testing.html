@@ -187,25 +187,88 @@ section:nth-child(8){animation-delay:.4s}
 
 <nav><div class="wrap">
   <div class="cluster">
-    <a href="#how">How it works</a>
-    <a href="#packet">Packet &amp; log format</a>
-    <a href="#procedure">Field procedure</a>
+    <a href="#logproc">Log Processor</a>
   </div>
   <span class="sep">·</span>
   <div class="cluster">
-    <a href="#calc-link">Link budget</a>
-    <a href="#calc-fresnel">Fresnel / horizon</a>
-    <a href="#calc-toa">Time-on-air</a>
+    <a href="#how">Overview</a>
+    <a href="#packet">Packet Format</a>
+    <a href="#procedure">Field Procedure</a>
+  </div>
+  <span class="sep">·</span>
+  <div class="cluster">
+    <a href="#calc-link">Link Budget</a>
+    <a href="#calc-fresnel">Fresnel</a>
+    <a href="#calc-toa">Airtime</a>
     <a href="#calc-dist">Distance</a>
-    <a href="#logproc">Log processor</a>
   </div>
 </div></nav>
 
 <main>
 
+<!-- ============================ LOG PROCESSOR ============================ -->
+<section id="logproc">
+  <h2>Log Processor</h2>
+  <p class="lead">Drop an RX CSV from the SD card. Computes per-packet distance (RX GPS ↔ TX GPS),
+  builds RSSI/SNR-vs-distance plots, maps every packet colored by signal, and reports max range &amp;
+  delivery ratio. Everything runs locally in your browser — nothing is uploaded.</p>
+
+  <div class="panel">
+    <div id="drop" class="drop">
+      <b>Drop CSV here</b> or click to choose · <span class="muted">also accepts the legacy single-GPS log</span>
+      <input id="file" type="file" accept=".csv,text/csv" hidden>
+    </div>
+
+    <div class="callout info" id="refbox" style="display:none">
+      <b>Single-GPS log detected</b> — no <code>tx_lat_e7/tx_lng_e7</code> columns. Enter the fixed
+      base/reference coordinate to measure distance against:
+      <div class="grid cols2" style="margin-top:.6rem">
+        <div class="field"><label>Reference latitude</label><input id="ref_lat" type="number" step="any" placeholder="e.g. 37.7749"></div>
+        <div class="field"><label>Reference longitude</label><input id="ref_lng" type="number" step="any" placeholder="e.g. -122.4194"></div>
+      </div>
+      <button class="ghost" id="ref_apply">Apply reference</button>
+    </div>
+
+    <div id="results" style="display:none">
+      <div class="statgrid" id="stats"></div>
+
+      <div class="grid cols3">
+        <div class="panel2 panel"><h3>RSSI vs distance</h3><canvas id="chRssi" height="220"></canvas></div>
+        <div class="panel2 panel"><h3>SNR vs distance</h3><canvas id="chSnr" height="220"></canvas></div>
+        <div class="panel2 panel"><h3>Latency vs distance</h3><canvas id="chLat" height="220"></canvas></div>
+      </div>
+      <small class="note" style="display:block;margin-top:.4rem">Latency = (rx_gps_us − tx_gps_us) / 1000. Requires GPS-PPS-synced timestamps in the CSV.</small>
+
+      <h3 style="margin-top:1.4rem">Map</h3>
+      <div style="margin-bottom:.6rem">
+        <label style="display:inline-flex;align-items:center;gap:.4rem;cursor:pointer;color:var(--dim);font-size:.85rem">
+          <input type="checkbox" id="togglelines" checked style="accent-color:var(--accent)">
+          Show TX→RX lines
+        </label>
+      </div>
+      <div id="map"></div>
+      <div class="legend">
+        <span><i style="background:#7a9e7e"></i>strong (≥ −90 dBm)</span>
+        <span><i style="background:#a094b8"></i>good</span>
+        <span><i style="background:#e8a840"></i>fair</span>
+        <span><i style="background:#c48030"></i>weak</span>
+        <span><i style="background:#c04040"></i>near floor</span>
+        <span><i style="background:#e8a840"></i>base / reference</span>
+      </div>
+
+      <div style="margin-top:1rem;display:flex;gap:.6rem;flex-wrap:wrap">
+        <button class="ghost" id="dl">Download processed CSV (with distances)</button>
+        <button class="ghost" id="reset">Load another file</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
+
 <!-- ============================ HOW IT WORKS ============================ -->
 <section id="how">
-  <h2>1 · How range testing works</h2>
+  <h2>Range Testing Overview</h2>
   <p class="lead">Two identical radios. One transmits GPS-stamped beacon packets on a fixed cadence;
   the other receives them, measures signal quality (RSSI / SNR), and logs both ends' positions to its
   microSD card. Drive or walk the nodes apart until the link breaks. The farthest distance still
@@ -271,7 +334,7 @@ section:nth-child(8){animation-delay:.4s}
 
 <!-- ============================ PACKET / LOG FORMAT ============================ -->
 <section id="packet">
-  <h2>2 · Packet &amp; log format</h2>
+  <h2>Packet Format</h2>
 
   <div class="grid cols2">
     <div class="panel">
@@ -312,7 +375,7 @@ tx_gps_us,rx_gps_us           // GPS-synced Unix µs — latency = (rx − tx) /
 
 <!-- ============================ PROCEDURE ============================ -->
 <section id="procedure">
-  <h2>3 · Field procedure — how it's used</h2>
+  <h2>Field Procedure</h2>
   <div class="panel">
     <div class="steps">
     <div class="step"><div class="n">1</div><div><b>Pre-flight (bench).</b> Confirm both nodes get GPS
@@ -346,7 +409,7 @@ tx_gps_us,rx_gps_us           // GPS-synced Unix µs — latency = (rx − tx) /
 
 <!-- ============================ LINK BUDGET ============================ -->
 <section id="calc-link">
-  <h2>4 · Calculator — link budget → range (915 MHz)</h2>
+  <h2>Link Budget Calculator</h2>
   <p class="lead">Predicts the theoretical free-space range from Tx power, antenna gains, and the
   receiver sensitivity for the chosen spreading factor. Free-space is an <b>optimistic ceiling</b>:
   ground reflection, foliage, and terrain cut it sharply.</p>
@@ -382,7 +445,7 @@ tx_gps_us,rx_gps_us           // GPS-synced Unix µs — latency = (rx − tx) /
 
 <!-- ============================ FRESNEL / HORIZON ============================ -->
 <section id="calc-fresnel">
-  <h2>5 · Calculator — Fresnel zone &amp; radio horizon</h2>
+  <h2>Fresnel Zone Calculator</h2>
   <p class="lead">Even with line-of-sight, the link needs clearance through the 1st Fresnel zone, and
   beyond the radio horizon the earth's curvature blocks it entirely. Use this to pick antenna heights.</p>
   <div class="panel grid cols2">
@@ -404,7 +467,7 @@ tx_gps_us,rx_gps_us           // GPS-synced Unix µs — latency = (rx − tx) /
 
 <!-- ============================ TIME ON AIR ============================ -->
 <section id="calc-toa">
-  <h2>6 · Calculator — time-on-air &amp; duty</h2>
+  <h2>Airtime Calculator</h2>
   <p class="lead">Airtime sets your beacon cadence and, on duty-limited bands, your legal max. Bigger SF
   = more range but longer airtime = fewer packets/sec and coarser distance sampling.</p>
   <div class="panel grid cols3">
@@ -440,7 +503,7 @@ tx_gps_us,rx_gps_us           // GPS-synced Unix µs — latency = (rx − tx) /
 
 <!-- ============================ DISTANCE ============================ -->
 <section id="calc-dist">
-  <h2>7 · Calculator — distance &amp; bearing (haversine)</h2>
+  <h2>Distance Calculator</h2>
   <p class="lead">Great-circle distance + initial bearing between two coordinates. The same haversine
   the log processor uses per row. Paste decimal degrees.</p>
   <div class="panel grid cols2">
@@ -454,66 +517,6 @@ tx_gps_us,rx_gps_us           // GPS-synced Unix µs — latency = (rx − tx) /
     </div>
   </div>
   <div class="panel out" id="d_out"></div>
-</section>
-
-<div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
-
-<!-- ============================ LOG PROCESSOR ============================ -->
-<section id="logproc">
-  <h2>8 · Log processor — CSV → range curve + map</h2>
-  <p class="lead">Drop an RX CSV from the SD card. Computes per-packet distance (RX GPS ↔ TX GPS),
-  builds RSSI/SNR-vs-distance plots, maps every packet colored by signal, and reports max range &amp;
-  delivery ratio. Everything runs locally in your browser — nothing is uploaded.</p>
-
-  <div class="panel">
-    <div id="drop" class="drop">
-      <b>Drop CSV here</b> or click to choose · <span class="muted">also accepts the legacy single-GPS log</span>
-      <input id="file" type="file" accept=".csv,text/csv" hidden>
-    </div>
-
-    <div class="callout info" id="refbox" style="display:none">
-      <b>Single-GPS log detected</b> — no <code>tx_lat_e7/tx_lng_e7</code> columns. Enter the fixed
-      base/reference coordinate to measure distance against:
-      <div class="grid cols2" style="margin-top:.6rem">
-        <div class="field"><label>Reference latitude</label><input id="ref_lat" type="number" step="any" placeholder="e.g. 37.7749"></div>
-        <div class="field"><label>Reference longitude</label><input id="ref_lng" type="number" step="any" placeholder="e.g. -122.4194"></div>
-      </div>
-      <button class="ghost" id="ref_apply">Apply reference</button>
-    </div>
-
-    <div id="results" style="display:none">
-      <div class="statgrid" id="stats"></div>
-
-      <div class="grid cols3">
-        <div class="panel2 panel"><h3>RSSI vs distance</h3><canvas id="chRssi" height="220"></canvas></div>
-        <div class="panel2 panel"><h3>SNR vs distance</h3><canvas id="chSnr" height="220"></canvas></div>
-        <div class="panel2 panel"><h3>Latency vs distance</h3><canvas id="chLat" height="220"></canvas></div>
-      </div>
-      <small class="note" style="display:block;margin-top:.4rem">Latency = (rx_gps_us − tx_gps_us) / 1000. Requires GPS-PPS-synced timestamps in the CSV.</small>
-
-      <h3 style="margin-top:1.4rem">Map</h3>
-      <div style="margin-bottom:.6rem">
-        <label style="display:inline-flex;align-items:center;gap:.4rem;cursor:pointer;color:var(--dim);font-size:.85rem">
-          <input type="checkbox" id="togglelines" checked style="accent-color:var(--accent)">
-          Show TX→RX lines
-        </label>
-      </div>
-      <div id="map"></div>
-      <div class="legend">
-        <span><i style="background:#7a9e7e"></i>strong (≥ −90 dBm)</span>
-        <span><i style="background:#a094b8"></i>good</span>
-        <span><i style="background:#e8a840"></i>fair</span>
-        <span><i style="background:#c48030"></i>weak</span>
-        <span><i style="background:#c04040"></i>near floor</span>
-        <span><i style="background:#e8a840"></i>base / reference</span>
-      </div>
-
-      <div style="margin-top:1rem;display:flex;gap:.6rem;flex-wrap:wrap">
-        <button class="ghost" id="dl">Download processed CSV (with distances)</button>
-        <button class="ghost" id="reset">Load another file</button>
-      </div>
-    </div>
-  </div>
 </section>
 
 </main>
