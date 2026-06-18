@@ -484,14 +484,12 @@ tx_gps_us,rx_gps_us           // GPS-synced Unix µs — latency = (rx − tx) /
     <div id="results" style="display:none">
       <div class="statgrid" id="stats"></div>
 
-      <div class="grid cols2">
+      <div class="grid cols3">
         <div class="panel2 panel"><h3>RSSI vs distance</h3><canvas id="chRssi" height="220"></canvas></div>
         <div class="panel2 panel"><h3>SNR vs distance</h3><canvas id="chSnr" height="220"></canvas></div>
+        <div class="panel2 panel"><h3>Latency vs distance</h3><canvas id="chLat" height="220"></canvas></div>
       </div>
-      <div class="panel2 panel" style="margin-top:1rem"><h3>Latency vs distance</h3>
-        <canvas id="chLat" height="220"></canvas>
-        <small class="note">Latency = (rx_gps_us − tx_gps_us) / 1000. Requires GPS-PPS-synced timestamps in the CSV.</small>
-      </div>
+      <small class="note" style="display:block;margin-top:.4rem">Latency = (rx_gps_us − tx_gps_us) / 1000. Requires GPS-PPS-synced timestamps in the CSV.</small>
 
       <h3 style="margin-top:1.4rem">Map</h3>
       <div style="margin-bottom:.6rem">
