@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sftrk · LoRa Range Testing</title>
+
+<!-- Google Fonts: DM Serif Display, Work Sans, JetBrains Mono -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Work+Sans:wght@400;500;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+
+<!-- CDN deps (need internet when first opened) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+
+<!-- pure computation core (shared with the Node test suite) -->
+<script src="range-lib.js"></script>
+
+<style>
+:root{
+  --bg:#0d0812; --panel:#1a1226; --panel2:#221a30; --edge:#2d2538;
+  --ink:#e8e0f0; --dim:#a094b8; --accent:#e8a840; --accent2:#7a9e7e;
+  --good:#7a9e7e; --warn:#e8a840; --bad:#e05555; --mono:#d4c8e8;
+  --plum:#b8a0d0; --deep:#2a1f3a;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;font:400 15px/1.65 'Work Sans',system-ui,-apple-system,sans-serif;
+  background:var(--bg);color:var(--ink);position:relative;min-height:100vh}
+body::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background:
+    radial-gradient(1000px 700px at 80% -15%,rgba(232,168,64,.04),transparent),
+    radial-gradient(900px 600px at 15% 100%,rgba(26,18,38,.7),transparent)}
+body::after{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.4;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E")}
+code,kbd,.mono{font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+h1,h2,h3{font-family:'DM Serif Display',Georgia,serif;line-height:1.2;font-weight:400}
+h2{margin-top:0;font-size:1.6rem;border:0;padding-bottom:0}
+h3{font-size:1.15rem;color:var(--accent);font-weight:400}
+a{color:var(--accent);transition:color .2s}
+a:hover{color:#f0c060}
+hr{border:0;height:1px;background:linear-gradient(90deg,transparent,var(--edge),transparent);margin:2rem 0}
+
+header{padding:2.6rem 1.2rem 1.6rem;border-bottom:1px solid var(--edge)}
+header .wrap{max-width:1100px;margin:0 auto}
+.brand{font-size:.7rem;letter-spacing:.3em;color:var(--plum);text-transform:uppercase}
+header h1{font-size:2.6rem;margin:.15rem 0 .1rem}
+header .sub{color:var(--dim);max-width:65ch;margin-left:1.2rem;line-height:1.5}
+header .tags{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.9rem;margin-left:2.5rem}
+.tag{display:inline-block;font-size:.72rem;padding:.15rem .55rem;border-radius:999px;
+  border:1px solid var(--edge);color:var(--dim);background:var(--panel)}
+.tag+.tag{margin-left:0}
+
+nav{position:sticky;top:0;z-index:1000;background:rgba(13,8,18,.9);
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--edge)}
+nav .wrap{max-width:1100px;margin:0 auto;display:flex;gap:.15rem;flex-wrap:wrap;
+  padding:.5rem .8rem;align-items:center}
+nav .cluster{display:inline-flex;gap:.1rem;flex-wrap:wrap}
+nav .sep{color:var(--edge);padding:0 .2rem;user-select:none;font-size:.85rem}
+nav a{color:var(--dim);text-decoration:none;padding:.3rem .65rem;border-radius:6px;
+  font-size:.88rem;transition:color .2s,background .2s;position:relative}
+nav a:hover{background:var(--panel);color:var(--ink)}
+nav a.active{color:var(--accent)}
+nav a.active::after{content:'';position:absolute;bottom:0;left:.5rem;right:.5rem;
+  height:2px;background:var(--accent);border-radius:1px}
+
+main{max-width:1100px;margin:0 auto;padding:1.5rem 1.2rem 5rem;position:relative;z-index:1}
+section{margin:3rem 0;scroll-margin-top:60px}
+.section-divider{display:flex;justify-content:center;gap:.5rem;margin:-2.2rem 0 0;opacity:.25;user-select:none}
+.section-divider .d{width:3px;height:3px;border-radius:50%;background:var(--plum)}
+
+.panel{background:var(--panel);border:1px solid var(--edge);border-radius:12px;
+  padding:1.3rem 1.4rem;margin:1rem 0}
+.panel2{background:var(--panel2)}
+.panel-flat{background:transparent;border:0;padding:0;margin:1rem 0}
+.grid{display:grid;gap:1rem}
+@media(min-width:780px){.cols2{grid-template-columns:1fr 1fr}.cols3{grid-template-columns:1fr 1fr 1fr}}
+
+.lead{color:var(--dim)}
+.callout{padding:.8rem 1rem;border-radius:0 9px 9px 0;margin:1rem 0;
+  border-left:2px solid var(--warn);
+  background:linear-gradient(90deg,rgba(232,168,64,.045),transparent)}
+.callout.info{border-color:var(--accent2);
+  background:linear-gradient(90deg,rgba(122,158,126,.045),transparent)}
+.callout.gap{border-color:var(--plum);
+  background:linear-gradient(90deg,rgba(184,160,208,.05),transparent)}
+.callout b{color:var(--ink)}
+
+table{width:100%;border-collapse:collapse;font-size:.88rem;margin:.5rem 0}
+th,td{text-align:left;padding:.4rem .55rem;border-bottom:1px solid var(--edge)}
+th{color:var(--dim);font-weight:500}
+tr:nth-child(even){background:rgba(45,37,56,.25)}
+td.mono,th.mono{font-family:'JetBrains Mono',monospace}
+
+pre{background:var(--deep);border:1px solid var(--edge);border-radius:9px;
+  padding:.9rem 1rem;overflow:auto;font-size:.84rem;color:var(--mono)}
+.steps{position:relative;padding-left:.6rem}
+.steps::before{content:'';position:absolute;left:1rem;top:.6rem;bottom:.6rem;
+  width:1px;border-left:1px dotted rgba(232,168,64,.25)}
+.step{display:flex;gap:.8rem;margin:.9rem 0;position:relative}
+.step .n{flex:0 0 1.8rem;height:1.8rem;border-radius:50%;background:var(--accent);
+  color:#0d0812;font-weight:600;display:grid;place-items:center;font-size:.85rem;
+  position:relative;z-index:1}
+
+.field{display:flex;flex-direction:column;gap:.25rem;margin:.5rem 0}
+.field label{font-size:.82rem;color:var(--dim);font-weight:500}
+.field .hint{font-size:.72rem;color:#7a7090}
+input,select{background:var(--deep);border:1px solid var(--edge);color:var(--ink);
+  border-radius:8px;padding:.5rem .65rem;font:inherit;width:100%;
+  transition:border-color .2s,box-shadow .2s}
+input:focus,select:focus{outline:0;border-color:var(--accent);
+  box-shadow:0 0 0 1px var(--accent)}
+input:hover,select:hover{border-color:#3d3050}
+button{background:var(--accent);color:#0d0812;border:0;border-radius:8px;
+  padding:.5rem 1rem;font-weight:600;cursor:pointer;font-family:'Work Sans',sans-serif;
+  transition:transform .15s,box-shadow .15s}
+button:hover{transform:translateY(-1px);box-shadow:0 2px 8px rgba(232,168,64,.25)}
+button:active{transform:translateY(0)}
+button.ghost{background:var(--panel);color:var(--ink);border:1px solid var(--edge)}
+button.ghost:hover{background:var(--panel2);box-shadow:none}
+.out{background:var(--deep);border:1px dashed var(--edge);border-radius:9px;
+  padding:.8rem 1rem;margin-top:.7rem}
+.out .big{font-size:1.5rem;font-weight:600;color:var(--accent)}
+.out .row{display:flex;justify-content:space-between;gap:1rem;
+  padding:.15rem 0;border-bottom:1px dotted var(--edge)}
+.out .row:last-child{border:0}
+.k{color:var(--dim)}
+.v{font-family:'JetBrains Mono',monospace;font-size:.92rem}
+.v.good{color:var(--good)}.v.warn{color:var(--warn)}.v.bad{color:var(--bad)}
+
+#map{height:420px;border-radius:10px;border:1px solid var(--edge);margin-top:1rem}
+.legend{display:flex;gap:.8rem;flex-wrap:wrap;font-size:.8rem;color:var(--dim);margin-top:.5rem}
+.legend i{display:inline-block;width:.8rem;height:.8rem;border-radius:50%;margin-right:.3rem;vertical-align:middle}
+.statgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.7rem;margin:1rem 0}
+.stat{background:var(--deep);border:1px solid var(--edge);border-radius:9px;padding:.7rem .9rem}
+.stat .l{font-size:.74rem;color:var(--dim)}
+.stat .n{font-size:1.3rem;font-weight:600}
+.stat:first-child .n{color:var(--accent)}
+.drop{border:2px dashed var(--edge);border-radius:11px;padding:1.4rem;text-align:center;color:var(--dim);
+  cursor:pointer;transition:border-color .2s,background .2s,transform .15s}
+.drop:hover,.drop.drag{border-color:var(--accent);background:rgba(232,168,64,.06);color:var(--ink);transform:scale(1.01)}
+canvas{max-width:100%}
+footer{max-width:1100px;margin:0 auto;padding:2rem 1.2rem;color:#7a7090;font-size:.82rem;border-top:1px solid var(--edge);text-align:center}
+.muted{color:var(--dim)}
+small.note{color:#7a7090}
+
+@keyframes revealUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+section{animation:revealUp .6s ease-out both}
+section:nth-child(1){animation-delay:.05s}
+section:nth-child(2){animation-delay:.1s}
+section:nth-child(3){animation-delay:.15s}
+section:nth-child(4){animation-delay:.2s}
+section:nth-child(5){animation-delay:.25s}
+section:nth-child(6){animation-delay:.3s}
+section:nth-child(7){animation-delay:.35s}
+section:nth-child(8){animation-delay:.4s}
+@media(prefers-reduced-motion:reduce){section{animation:none}}
+
+@media(max-width:780px){
+  header h1{font-size:1.8rem}
+  header .sub{margin-left:0}
+  header .tags{margin-left:1.5rem}
+  nav a{font-size:.82rem;padding:.25rem .5rem}
+}
+@media(max-width:500px){
+  nav .sep{display:none}
+}
+</style>
+</head>
+<body>
+
+<header><div class="wrap">
+  <span class="brand">sftrk</span>
+  <h1>Field Range Testing Suite</h1>
+  <p class="sub">How the SX1262 / nice!nano range-test rig works, how to run a test in the field, and the
+     calculators + log processor that turn raw SD-card CSV into a measured range curve.</p>
+  <div class="tags">
+    <span class="tag">915 MHz · FCC</span><span class="tag">SX1262 (HT-RA62)</span>
+    <span class="tag">nRF52840 nice!nano</span><span class="tag">GPS-tagged packets</span>
+  </div>
+</div></header>
+
+<nav><div class="wrap">
+  <div class="cluster">
+    <a href="#how">How it works</a>
+    <a href="#packet">Packet &amp; log format</a>
+    <a href="#procedure">Field procedure</a>
+  </div>
+  <span class="sep">·</span>
+  <div class="cluster">
+    <a href="#calc-link">Link budget</a>
+    <a href="#calc-fresnel">Fresnel / horizon</a>
+    <a href="#calc-toa">Time-on-air</a>
+    <a href="#calc-dist">Distance</a>
+    <a href="#logproc">Log processor</a>
+  </div>
+</div></nav>
+
+<main>
+
+<!-- ============================ HOW IT WORKS ============================ -->
+<section id="how">
+  <h2>1 · How range testing works</h2>
+  <p class="lead">Two identical radios. One transmits GPS-stamped beacon packets on a fixed cadence;
+  the other receives them, measures signal quality (RSSI / SNR), and logs both ends' positions to its
+  microSD card. Drive or walk the nodes apart until the link breaks. The farthest distance still
+  delivering good packets is the measured range.</p>
+
+  <div class="grid cols2">
+    <div class="panel">
+      <h3>Roles</h3>
+      <table>
+        <tr><th>Node</th><th>Job</th></tr>
+        <tr><td class="mono">TX (beacon)</td><td>Every <em>T</em> seconds, sample its GPS, build a
+          packet <b>containing its own lat/lng + a monotonic packet_id</b>, transmit.</td></tr>
+        <tr><td class="mono">RX (logger)</td><td>On each received packet: read RSSI &amp; SNR, sample
+          its <em>own</em> GPS, parse the TX's GPS out of the payload, write one CSV row. Missing
+          packet_ids = losses.</td></tr>
+      </table>
+      <p class="muted">Both ends run the same firmware; <code>NODE_ID</code> + a runtime role flag pick
+      TX vs RX. Either node can be the static "base"; the other roves.</p>
+    </div>
+
+    <div class="panel">
+      <h3>Why GPS lives in the payload</h3>
+      <p>Range = distance between the <b>two antennas at the instant of the packet</b>. Putting the TX
+      position inside the payload means a <b>single RX log file is self-sufficient</b>: every row already
+      has both endpoints (RX GPS from the local module, TX GPS from the payload). No clock-syncing two
+      logs, no post-hoc GPX join.</p>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Hardware &amp; firmware (this repo)</h3>
+    <div class="grid cols2">
+      <div>
+        <table>
+          <tr><th>Block</th><th>Part / pins</th></tr>
+          <tr><td>MCU</td><td class="mono">nice!nano — nRF52840</td></tr>
+          <tr><td>Radio</td><td class="mono">HT-RA62 (SX1262), shared SPI</td></tr>
+          <tr><td>GPS</td><td class="mono">UART P0.20 RX / P0.22 TX @9600</td></tr>
+          <tr><td>Storage</td><td class="mono">microSD, SPI CS P0.11</td></tr>
+        </table>
+      </div>
+      <div>
+        <p class="muted">FreeRTOS tasks: <code>gpsPoll</code> (TinyGPS++ decode → shared
+        <code>latestFix</code> under mutex), <code>lora_handleRx</code> (DIO1 ISR →
+        <code>radioIrqQueue</code> → read packet + RSSI/SNR), <code>writeLogTask</code>
+        (drains <code>logQueue</code> → 512&nbsp;B buffer → SD, periodic <code>flush()</code> sync).</p>
+        <p class="muted">SX1262 and SD share one SPI bus: bring the radio up then
+        <code>sleep()</code> it (NSS high → MISO Hi-Z) before SD I/O.</p>
+      </div>
+    </div>
+    <div class="callout gap">
+      <b>Firmware gap (intended vs current).</b> The payload-GPS design above requires the TX coordinates
+      to be parsed from the packet and written as extra CSV columns
+      (<code>tx_lat_e7</code>, <code>tx_lng_e7</code>). Current <code>src/main.cpp</code> defines a
+      single-GPS header and its <code>logQueue</code> consumer isn't wired yet — the log processor below
+      therefore <b>also accepts a single-GPS CSV plus a fixed "reference point"</b> so you can test the
+      tooling before the firmware catches up.
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
+
+<!-- ============================ PACKET / LOG FORMAT ============================ -->
+<section id="packet">
+  <h2>2 · Packet &amp; log format</h2>
+
+  <div class="grid cols2">
+    <div class="panel">
+      <h3>Beacon payload (TX → air)</h3>
+      <p class="muted">Compact fixed layout — carries TX position and GPS-PPS-synced timestamp so the RX side can compute latency.</p>
+      <pre>struct Beacon {        // 22 bytes
+  uint8_t  node_id;    // who sent it
+  uint32_t packet_id;  // monotonic, for loss detection
+  int32_t  lat_e7;     // TX latitude  × 1e7
+  int32_t  lng_e7;     // TX longitude × 1e7
+  uint64_t tx_gps_us;  // TX GPS-synced Unix time, µs (since epoch)
+  uint8_t  flags;      // fix-valid, sats bucket, ...
+};</pre>
+      <small class="note">lat/lng as int32 ×1e7 ≈ 1.1&nbsp;cm resolution, no float on the wire. See <code>docs/PACKET_FORMAT.md</code> for full details.</small>
+    </div>
+
+    <div class="panel">
+      <h3>RX CSV row (logger → SD)</h3>
+      <p class="muted">Header written once per file. One row per received packet. GPS-PPS-synced timestamps enable latency measurement.</p>
+      <pre>time_valid,utc_iso,event_type,node_id,packet_id,
+rx_lat_e7,rx_lng_e7,          // local GPS (logger)
+tx_lat_e7,tx_lng_e7,          // from payload (beacon)
+gps_fix_time_us,rssi_dbm,snr_db,
+tx_gps_us,rx_gps_us           // GPS-synced Unix µs — latency = (rx − tx) / 1000</pre>
+      <small class="note">Filenames <code>N{node}_{seq}.csv</code> (e.g. <code>N02_0007.csv</code>),
+      sequential, never overwritten. See <code>docs/PACKET_FORMAT.md</code> for full spec.</small>
+    </div>
+  </div>
+
+  <div class="callout info">
+    <b>Loss / PDR.</b> The log records only <em>received</em> packets. Packet delivery ratio at a given
+    distance = received <code>packet_id</code>s ÷ expected span (max−min+1). Gaps in
+    <code>packet_id</code> are the dropped packets — the processor reports them per distance bin.
+  </div>
+</section>
+
+<div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
+
+<!-- ============================ PROCEDURE ============================ -->
+<section id="procedure">
+  <h2>3 · Field procedure — how it's used</h2>
+  <div class="panel">
+    <div class="steps">
+    <div class="step"><div class="n">1</div><div><b>Pre-flight (bench).</b> Confirm both nodes get GPS
+      fix (sat count &gt; 4), TX is beaconing, RX is writing rows to a fresh CSV. Note SF/BW/CR and
+      Tx power — they decide sensitivity and time-on-air.</div></div>
+    <div class="step"><div class="n">2</div><div><b>Plan the route.</b> Use the
+      <a href="#calc-link">link-budget</a> calc for an expected range, and
+      <a href="#calc-fresnel">Fresnel / horizon</a> to sanity-check line-of-sight and antenna height
+      for that distance.</div></div>
+    <div class="step"><div class="n">3</div><div><b>Place the base.</b> Park one node at a known,
+      open, elevated spot. Record its exact coordinate (it's also in every payload, but write it down).</div></div>
+    <div class="step"><div class="n">4</div><div><b>Rove.</b> Move the other node outward along the
+      route. Keep antennas vertical and clear of the body/vehicle. Pause at markers so each distance
+      gets several packets.</div></div>
+    <div class="step"><div class="n">5</div><div><b>Find the edge.</b> Continue until RSSI approaches
+      sensitivity and packets start dropping. The last distance with acceptable PDR is the range for
+      that config.</div></div>
+    <div class="step"><div class="n">6</div><div><b>Recover &amp; process.</b> Power down cleanly (so
+      the SD flush commits), pull the card, drop the CSV into the
+      <a href="#logproc">log processor</a> for the range curve + map.</div></div>
+    </div>
+  </div>
+  <div class="callout">
+    <b>Watch RSSI vs. SNR.</b> LoRa decodes <em>below</em> the noise floor — SNR can be negative on good
+    packets. A packet that drops with RSSI still well above sensitivity points to interference or a
+    Fresnel/obstruction problem, not raw range.
+  </div>
+</section>
+
+<div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
+
+<!-- ============================ LINK BUDGET ============================ -->
+<section id="calc-link">
+  <h2>4 · Calculator — link budget → range (915 MHz)</h2>
+  <p class="lead">Predicts the theoretical free-space range from Tx power, antenna gains, and the
+  receiver sensitivity for the chosen spreading factor. Free-space is an <b>optimistic ceiling</b>:
+  ground reflection, foliage, and terrain cut it sharply.</p>
+  <div class="panel grid cols2">
+    <div>
+      <div class="field"><label>Frequency (MHz)</label><input id="lb_f" type="number" value="915" step="1"></div>
+      <div class="field"><label>Tx power (dBm)</label><input id="lb_ptx" type="number" value="22" step="0.5">
+        <span class="hint">SX1262 max +22 dBm</span></div>
+      <div class="field"><label>Tx antenna gain (dBi)</label><input id="lb_gt" type="number" value="2.15" step="0.1"></div>
+      <div class="field"><label>Rx antenna gain (dBi)</label><input id="lb_gr" type="number" value="2.15" step="0.1"></div>
+    </div>
+    <div>
+      <div class="field"><label>Cable / connector loss, both ends (dB)</label><input id="lb_loss" type="number" value="1" step="0.5"></div>
+      <div class="field"><label>Spreading factor / sensitivity (BW 125 kHz)</label>
+        <select id="lb_sf">
+          <option value="-124">SF7 — −124 dBm</option>
+          <option value="-127">SF8 — −127 dBm</option>
+          <option value="-130">SF9 — −130 dBm</option>
+          <option value="-133">SF10 — −133 dBm</option>
+          <option value="-135.5">SF11 — −135.5 dBm</option>
+          <option value="-137" selected>SF12 — −137 dBm</option>
+        </select><span class="hint">SX1262 datasheet Table 3-8, 125 kHz, RX Boosted</span></div>
+      <div class="field"><label>Fade margin (dB)</label><input id="lb_fade" type="number" value="10" step="1">
+        <span class="hint">headroom for fading; 10–20 typical</span></div>
+    </div>
+  </div>
+  <div class="panel out" id="lb_out"></div>
+  <small class="note">FSPL(dB) = 20·log₁₀(d<sub>km</sub>) + 20·log₁₀(f<sub>MHz</sub>) + 32.44.
+  Max path loss = Ptx + Gt + Gr − loss − fade − sensitivity. Range solved from FSPL.</small>
+</section>
+
+<div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
+
+<!-- ============================ FRESNEL / HORIZON ============================ -->
+<section id="calc-fresnel">
+  <h2>5 · Calculator — Fresnel zone &amp; radio horizon</h2>
+  <p class="lead">Even with line-of-sight, the link needs clearance through the 1st Fresnel zone, and
+  beyond the radio horizon the earth's curvature blocks it entirely. Use this to pick antenna heights.</p>
+  <div class="panel grid cols2">
+    <div>
+      <div class="field"><label>Frequency (MHz)</label><input id="fr_f" type="number" value="915"></div>
+      <div class="field"><label>Path distance (km)</label><input id="fr_d" type="number" value="5" step="0.1"></div>
+    </div>
+    <div>
+      <div class="field"><label>TX antenna height (m)</label><input id="fr_h1" type="number" value="2" step="0.5"></div>
+      <div class="field"><label>RX antenna height (m)</label><input id="fr_h2" type="number" value="2" step="0.5"></div>
+    </div>
+  </div>
+  <div class="panel out" id="fr_out"></div>
+  <small class="note">F₁ at midpoint (m) = 8.657·√(d<sub>km</sub>/f<sub>GHz</sub>); 60% clearance is the
+  practical minimum. Radio horizon (4/3-earth) d<sub>km</sub> = 4.12·(√h₁ + √h₂), h in m.</small>
+</section>
+
+<div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
+
+<!-- ============================ TIME ON AIR ============================ -->
+<section id="calc-toa">
+  <h2>6 · Calculator — time-on-air &amp; duty</h2>
+  <p class="lead">Airtime sets your beacon cadence and, on duty-limited bands, your legal max. Bigger SF
+  = more range but longer airtime = fewer packets/sec and coarser distance sampling.</p>
+  <div class="panel grid cols3">
+    <div>
+      <div class="field"><label>Spreading factor</label>
+        <select id="ta_sf"><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option selected>12</option></select></div>
+      <div class="field"><label>Bandwidth (kHz)</label>
+        <select id="ta_bw"><option>125</option><option>250</option><option>500</option></select></div>
+      <div class="field"><label>Coding rate 4/(4+x)</label>
+        <select id="ta_cr"><option value="1" selected>4/5</option><option value="2">4/6</option><option value="3">4/7</option><option value="4">4/8</option></select></div>
+    </div>
+    <div>
+      <div class="field"><label>Payload (bytes)</label><input id="ta_pl" type="number" value="14"></div>
+      <div class="field"><label>Preamble symbols</label><input id="ta_pre" type="number" value="8"></div>
+      <div class="field"><label>Beacon period (s)</label><input id="ta_period" type="number" value="1" step="0.1"></div>
+    </div>
+    <div>
+      <div class="field"><label>Explicit header</label>
+        <select id="ta_ih"><option value="0" selected>yes (explicit)</option><option value="1">no (implicit)</option></select></div>
+      <div class="field"><label>CRC on</label>
+        <select id="ta_crc"><option value="1" selected>yes</option><option value="0">no</option></select></div>
+      <div class="field"><label>Low-data-rate optimize</label>
+        <select id="ta_ldro"><option value="-1" selected>auto (SF11/12@125k)</option><option value="1">force on</option><option value="0">force off</option></select></div>
+    </div>
+  </div>
+  <div class="panel out" id="ta_out"></div>
+  <small class="note">Semtech LoRa airtime model, SX1262 preamble (n+6.25 symbols — the SX126x
+  modem adds 2 symbols vs SX127x). Note: 915 MHz (FCC) has no fixed duty cycle but a 400 ms
+  dwell-time limit on frequency-hopping; airtime still bounds packets/sec.</small>
+</section>
+
+<div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
+
+<!-- ============================ DISTANCE ============================ -->
+<section id="calc-dist">
+  <h2>7 · Calculator — distance &amp; bearing (haversine)</h2>
+  <p class="lead">Great-circle distance + initial bearing between two coordinates. The same haversine
+  the log processor uses per row. Paste decimal degrees.</p>
+  <div class="panel grid cols2">
+    <div>
+      <div class="field"><label>Point A — latitude</label><input id="d_lat1" type="number" value="37.7749" step="any"></div>
+      <div class="field"><label>Point A — longitude</label><input id="d_lng1" type="number" value="-122.4194" step="any"></div>
+    </div>
+    <div>
+      <div class="field"><label>Point B — latitude</label><input id="d_lat2" type="number" value="37.8044" step="any"></div>
+      <div class="field"><label>Point B — longitude</label><input id="d_lng2" type="number" value="-122.2712" step="any"></div>
+    </div>
+  </div>
+  <div class="panel out" id="d_out"></div>
+</section>
+
+<div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
+
+<!-- ============================ LOG PROCESSOR ============================ -->
+<section id="logproc">
+  <h2>8 · Log processor — CSV → range curve + map</h2>
+  <p class="lead">Drop an RX CSV from the SD card. Computes per-packet distance (RX GPS ↔ TX GPS),
+  builds RSSI/SNR-vs-distance plots, maps every packet colored by signal, and reports max range &amp;
+  delivery ratio. Everything runs locally in your browser — nothing is uploaded.</p>
+
+  <div class="panel">
+    <div id="drop" class="drop">
+      <b>Drop CSV here</b> or click to choose · <span class="muted">also accepts the legacy single-GPS log</span>
+      <input id="file" type="file" accept=".csv,text/csv" hidden>
+    </div>
+
+    <div class="callout info" id="refbox" style="display:none">
+      <b>Single-GPS log detected</b> — no <code>tx_lat_e7/tx_lng_e7</code> columns. Enter the fixed
+      base/reference coordinate to measure distance against:
+      <div class="grid cols2" style="margin-top:.6rem">
+        <div class="field"><label>Reference latitude</label><input id="ref_lat" type="number" step="any" placeholder="e.g. 37.7749"></div>
+        <div class="field"><label>Reference longitude</label><input id="ref_lng" type="number" step="any" placeholder="e.g. -122.4194"></div>
+      </div>
+      <button class="ghost" id="ref_apply">Apply reference</button>
+    </div>
+
+    <div id="results" style="display:none">
+      <div class="statgrid" id="stats"></div>
+
+      <div class="grid cols2">
+        <div class="panel2 panel"><h3>RSSI vs distance</h3><canvas id="chRssi" height="220"></canvas></div>
+        <div class="panel2 panel"><h3>SNR vs distance</h3><canvas id="chSnr" height="220"></canvas></div>
+      </div>
+      <div class="panel2 panel" style="margin-top:1rem"><h3>Latency vs distance</h3>
+        <canvas id="chLat" height="220"></canvas>
+        <small class="note">Latency = (rx_gps_us − tx_gps_us) / 1000. Requires GPS-PPS-synced timestamps in the CSV.</small>
+      </div>
+
+      <h3 style="margin-top:1.4rem">Map</h3>
+      <div style="margin-bottom:.6rem">
+        <label style="display:inline-flex;align-items:center;gap:.4rem;cursor:pointer;color:var(--dim);font-size:.85rem">
+          <input type="checkbox" id="togglelines" checked style="accent-color:var(--accent)">
+          Show TX→RX lines
+        </label>
+      </div>
+      <div id="map"></div>
+      <div class="legend">
+        <span><i style="background:#7a9e7e"></i>strong (≥ −90 dBm)</span>
+        <span><i style="background:#a094b8"></i>good</span>
+        <span><i style="background:#e8a840"></i>fair</span>
+        <span><i style="background:#c48030"></i>weak</span>
+        <span><i style="background:#c04040"></i>near floor</span>
+        <span><i style="background:#e8a840"></i>base / reference</span>
+      </div>
+
+      <div style="margin-top:1rem;display:flex;gap:.6rem;flex-wrap:wrap">
+        <button class="ghost" id="dl">Download processed CSV (with distances)</button>
+        <button class="ghost" id="reset">Load another file</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  sftrk LoRa range testing · single-file tool · calculators use the Semtech LoRa airtime model and
+  free-space path loss; predicted ranges are theoretical ceilings, field range is always lower.
+  Map tiles © OpenStreetMap contributors.
+</footer>
+
+<script>
+/* ---------------- shared helpers ---------------- */
+const $ = id => document.getElementById(id);
+const num = id => parseFloat($(id).value);
+const fmt = (x,d=2) => (isFinite(x) ? x.toFixed(d) : '—');
+const RL = RangeLib;   // pure math core (range-lib.js), shared with the test suite
+
+/* ---------------- link budget ---------------- */
+function lb(){
+  const r = RL.linkBudget({
+    f:num('lb_f'), ptx:num('lb_ptx'), gt:num('lb_gt'), gr:num('lb_gr'),
+    loss:num('lb_loss'), sens:parseFloat($('lb_sf').value), fade:num('lb_fade')
+  });
+  const d_km = r.rangeKm;
+  const cls = d_km>=10?'good':d_km>=1?'warn':'bad';
+  $('lb_out').innerHTML =
+    `<div class="row"><span class="k">Max allowable path loss</span><span class="v">${fmt(r.maxPL,1)} dB</span></div>`+
+    `<div class="row"><span class="k">EIRP (approx)</span><span class="v">${fmt(r.eirp,1)} dBm</span></div>`+
+    `<div class="row"><span class="k">Link margin over sensitivity</span><span class="v">${fmt(r.margin,1)} dB</span></div>`+
+    `<div class="row"><span class="k">Theoretical free-space range</span>`+
+      `<span class="v ${cls} big">${d_km>=1?fmt(d_km,2)+' km':fmt(d_km*1000,0)+' m'}</span></div>`+
+    `<div class="row"><span class="k" style="font-size:.8rem">Realistic (÷5–10, ground/terrain)</span>`+
+      `<span class="v" style="font-size:.85rem">~${fmt(d_km/8,2)}–${fmt(d_km/4,2)} km</span></div>`;
+}
+
+/* ---------------- fresnel / horizon ---------------- */
+function fr(){
+  const r = RL.fresnel({ f:num('fr_f'), d:num('fr_d'), h1:num('fr_h1'), h2:num('fr_h2') });
+  $('fr_out').innerHTML =
+    `<div class="row"><span class="k">1st Fresnel radius (midpoint)</span><span class="v">${fmt(r.F1,1)} m</span></div>`+
+    `<div class="row"><span class="k">60% clearance needed</span><span class="v">${fmt(r.clear60,1)} m</span></div>`+
+    `<div class="row"><span class="k">Radio horizon (4/3 earth)</span><span class="v">${fmt(r.horizon,2)} km</span></div>`+
+    `<div class="row"><span class="k">Path vs horizon</span>`+
+      `<span class="v ${r.beyond?'bad':'good'}">${r.beyond?'BEYOND horizon — blocked':'within horizon — LoS possible'}</span></div>`;
+}
+
+/* ---------------- time on air (Semtech LoRa, SX1262 preamble) ---------------- */
+function toa(){
+  const r = RL.timeOnAir({
+    sf:parseInt($('ta_sf').value), bw:parseInt($('ta_bw').value),
+    cr:parseInt($('ta_cr').value), pl:num('ta_pl'), npre:num('ta_pre'),
+    ih:parseInt($('ta_ih').value), crc:parseInt($('ta_crc').value),
+    ldro:parseInt($('ta_ldro').value), period:num('ta_period')   // preambleOffset defaults 6.25
+  });
+  const dutyCls = r.duty<=1?'good':r.duty<=10?'warn':'bad';
+  $('ta_out').innerHTML =
+    `<div class="row"><span class="k">Symbol time</span><span class="v">${fmt(r.Tsym*1000,3)} ms ${r.de?'· LDRO on':''}</span></div>`+
+    `<div class="row"><span class="k">Payload symbols</span><span class="v">${r.payloadSymb}</span></div>`+
+    `<div class="row"><span class="k">Time on air</span><span class="v big">${fmt(r.toaMs,1)} ms</span></div>`+
+    `<div class="row"><span class="k">Max rate (back-to-back)</span><span class="v">${fmt(r.maxRate,1)} pkt/s</span></div>`+
+    `<div class="row"><span class="k">Airtime at ${fmt(num('ta_period'),1)} s period</span><span class="v ${dutyCls}">${fmt(r.duty,2)} %</span></div>`;
+}
+
+/* ---------------- distance calc ---------------- */
+function dcalc(){
+  const {dist,brg}=RL.haversine(num('d_lat1'),num('d_lng1'),num('d_lat2'),num('d_lng2'));
+  const compass=['N','NE','E','SE','S','SW','W','NW'][Math.round(brg/45)%8];
+  $('d_out').innerHTML =
+    `<div class="row"><span class="k">Distance</span><span class="v big">${dist>=1000?fmt(dist/1000,3)+' km':fmt(dist,1)+' m'}</span></div>`+
+    `<div class="row"><span class="k">also</span><span class="v">${fmt(dist,1)} m · ${fmt(dist/1609.344,3)} mi</span></div>`+
+    `<div class="row"><span class="k">Initial bearing</span><span class="v">${fmt(brg,1)}° (${compass})</span></div>`;
+}
+
+// wire up all calculators: recompute on any input change
+['lb_f','lb_ptx','lb_gt','lb_gr','lb_loss','lb_sf','lb_fade'].forEach(i=>$(i).oninput=lb);
+['fr_f','fr_d','fr_h1','fr_h2'].forEach(i=>$(i).oninput=fr);
+['ta_sf','ta_bw','ta_cr','ta_pl','ta_pre','ta_period','ta_ih','ta_crc','ta_ldro'].forEach(i=>$(i).oninput=toa);
+['d_lat1','d_lng1','d_lat2','d_lng2'].forEach(i=>$(i).oninput=dcalc);
+lb(); fr(); toa(); dcalc();
+
+/* ============================ LOG PROCESSOR ============================ */
+let headerMap={}, rawRows=[], processed=[], map=null, layer=null, chR=null, chS=null, chL=null;
+let markersLayer=null, linesLayer=null, linesVisible=true;
+
+function loadText(text){
+  const {idx,rows}=RL.parseCSV(text);
+  headerMap=idx; rawRows=rows;
+  const hasTx = RL.hasTxColumns(idx);
+  $('refbox').style.display = hasTx ? 'none' : 'block';
+  if(hasTx) build(null); // tx coords present, no reference needed
+}
+
+function build(ref){
+  processed = RL.processRows(headerMap, rawRows, ref);
+  if(!processed.length){ alert('No usable rows found (need RX + TX coordinates, or set a reference).'); return; }
+  render();
+}
+
+function render(){
+  $('results').style.display='block';
+  const s = RL.summarize(processed);
+  $('stats').innerHTML =
+    stat('Packets logged', s.count)+
+    stat('Max range', s.maxDist>=1000?fmt(s.maxDist/1000,2)+' km':fmt(s.maxDist,0)+' m')+
+    stat('Best RSSI', s.bestRssi!=null?s.bestRssi+' dBm':'—')+
+    stat('Worst RSSI', s.worstRssi!=null?s.worstRssi+' dBm':'—')+
+    stat('Delivery ratio', s.pdr!=null?fmt(s.pdr,1)+'%':'—')+
+    stat('Mean latency', s.meanLatency!=null?fmt(s.meanLatency,1)+' ms':'—')+
+    stat('Max latency', s.maxLatency!=null?fmt(s.maxLatency,1)+' ms':'—')+
+    stat('Mean dist', fmt(s.meanDist,0)+' m');
+
+  // charts
+  const pts=k=>processed.filter(p=>isFinite(p[k])).map(p=>({x:p.dist/1000,y:p[k]}));
+  chR&&chR.destroy(); chS&&chS.destroy(); chL&&chL.destroy();
+  chR=scatter('chRssi',pts('rssi'),'RSSI (dBm)','#e8a840');
+  chS=scatter('chSnr', pts('snr'), 'SNR (dB)','#7a9e7e');
+  chL=scatter('chLat', pts('latencyMs'), 'Latency (ms)','#b8a0d0');
+
+  // map
+  if(!map){ map=L.map('map'); L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+      {maxZoom:19,attribution:'© OpenStreetMap contributors · © CARTO'}).addTo(map); }
+  layer&&layer.remove();
+  markersLayer=L.layerGroup().addTo(map);
+  linesLayer=L.layerGroup();
+  if(linesVisible) linesLayer.addTo(map);
+  const bounds=[];
+  for(const p of processed){
+    L.circleMarker([p.rxLat,p.rxLng],{radius:5,color:'#2a1f3a',weight:1,
+      fillColor:RL.rssiColor(p.rssi),fillOpacity:.9})
+      .bindPopup(`#${p.pid??'?'} · ${fmt(p.dist,0)} m<br>RSSI ${isFinite(p.rssi)?p.rssi:'—'} dBm · SNR ${isFinite(p.snr)?p.snr:'—'} dB`+(isFinite(p.latencyMs)?`<br>Latency ${fmt(p.latencyMs,1)} ms`:''))
+      .addTo(markersLayer);
+    // TX→RX line, colored by RSSI
+    L.polyline([[p.txLat,p.txLng],[p.rxLat,p.rxLng]],
+      {color:RL.rssiColor(p.rssi),weight:1,opacity:0.5})
+      .addTo(linesLayer);
+    bounds.push([p.rxLat,p.rxLng]);
+  }
+  // base/reference marker = TX position (first row's tx coords)
+  const tx=processed[0];
+  L.circleMarker([tx.txLat,tx.txLng],{radius:8,color:'#e8e0f0',weight:2,fillColor:'#e8a840',fillOpacity:1})
+    .bindPopup('Base / reference').addTo(markersLayer);
+  bounds.push([tx.txLat,tx.txLng]);
+  map.fitBounds(bounds,{padding:[30,30]});
+  setTimeout(()=>map.invalidateSize(),100);
+  $('results').scrollIntoView({behavior:'smooth'});
+}
+
+const stat=(l,n)=>`<div class="stat"><div class="l">${l}</div><div class="n">${n}</div></div>`;
+
+function scatter(id,data,label,color){
+  return new Chart($(id),{type:'scatter',
+    data:{datasets:[{label,data,backgroundColor:color,pointRadius:3}]},
+    options:{responsive:true,
+      scales:{
+        x:{title:{display:true,text:'distance (km)'},ticks:{color:'#a094b8'},grid:{color:'#2d2538'}},
+        y:{title:{display:true,text:label},ticks:{color:'#a094b8'},grid:{color:'#2d2538'}}},
+      plugins:{legend:{labels:{color:'#e8e0f0'}}}}});
+}
+
+// file input wiring
+const drop=$('drop'), fileEl=$('file');
+drop.onclick=()=>fileEl.click();
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('drag');};
+drop.ondragleave=()=>drop.classList.remove('drag');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('drag');readFile(e.dataTransfer.files[0]);};
+fileEl.onchange=e=>readFile(e.target.files[0]);
+function readFile(f){ if(!f)return; const r=new FileReader(); r.onload=()=>loadText(r.result); r.readAsText(f); }
+$('ref_apply').onclick=()=>{
+  const lat=num('ref_lat'), lng=num('ref_lng');
+  if(!isFinite(lat)||!isFinite(lng)){alert('Enter valid reference lat/lng');return;}
+  build({lat,lng});
+};
+$('reset').onclick=()=>{$('results').style.display='none';$('refbox').style.display='none';fileEl.value='';};
+$('dl').onclick=()=>{
+  const head='pid,rx_lat,rx_lng,tx_lat,tx_lng,distance_m,bearing_deg,rssi_dbm,snr_db,latency_ms\n';
+  const body=processed.map(p=>[p.pid,p.rxLat,p.rxLng,p.txLat,p.txLng,fmt(p.dist,1),fmt(p.brg,1),p.rssi,p.snr,isFinite(p.latencyMs)?fmt(p.latencyMs,1):''].join(',')).join('\n');
+  const blob=new Blob([head+body],{type:'text/csv'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='range_processed.csv'; a.click();
+};
+
+// TX→RX line toggle
+$('togglelines').onchange=(e)=>{
+  linesVisible=e.target.checked;
+  if(linesLayer){
+    if(linesVisible) linesLayer.addTo(map);
+    else map.removeLayer(linesLayer);
+  }
+};
+</script>
+</body>
+</html>
