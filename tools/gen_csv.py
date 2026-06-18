@@ -59,8 +59,9 @@ PRESETS = {
 
 SPARKLINE_CHARS = '▁▂▃▄▅▆▇█'
 CSV_HEADER = (
-    'event_time_us,time_valid,utc_iso,event_type,node_id,packet_id,'
-    'lat_e7,lng_e7,gps_fix_time_us,rssi_dbm,snr_db,tx_lat_e7,tx_lng_e7'
+    'time_valid,utc_iso,event_type,node_id,packet_id,'
+    'lat_e7,lng_e7,gps_fix_time_us,rssi_dbm,snr_db,'
+    'tx_lat_e7,tx_lng_e7,tx_gps_us,rx_gps_us'
 )
 
 
@@ -100,6 +101,23 @@ def lat_to_e7(lat):
 
 def lng_to_e7(lng):
     return round(lng * 1e7)
+
+
+# ── Airtime Model (Semtech SX1262) ─────────────────────────────────────
+# Mirrors range-lib.js:timeOnAir() so generated latency matches what
+# real firmware would produce for the same SF/BW/CR/payload config.
+# Returns airtime in microseconds.
+def semtech_airtime_us(sf, bw_khz, cr, payload_bytes, npre=8,
+                       ih=0, crc=1, ldro=-1, preamble_offset=6.25):
+    bw = bw_khz * 1000.0
+    tsym = (2 ** sf) / bw
+    de = ldro if ldro != -1 else (1 if tsym > 0.016 else 0)
+    pret = (npre + preamble_offset) * tsym
+    numer = 8 * payload_bytes - 4 * sf + 28 + 16 * crc - 20 * ih
+    denom = 4 * (sf - 2 * de)
+    payload_symb = 8 + max(int((int(numer / denom) * (cr + 4)) if denom > 0 else 0), 0)
+    payload_t = payload_symb * tsym
+    return int(round((pret + payload_t) * 1e6))
 
 
 # ── Geocoding ──────────────────────────────────────────────────────────
@@ -205,11 +223,21 @@ def _radial_routes(tx_lat, tx_lng, count, max_range_km, gps_noise_sigma):
 def generate_rows(rx_points, tx_lat, tx_lng, f_mhz, ptx, gt, gr, loss,
                   beacon_interval, start_utc, rssi_sigma=3.0, snr_sigma=2.0,
                   noise_floor=NOISE_FLOOR_DEFAULT,
-                  gap_rate=0.0, drop_curve_km=None, max_range_km=None):
+                  gap_rate=0.0, drop_curve_km=None, max_range_km=None,
+                  sf=12, bw_khz=125, cr=1, payload_bytes=22,
+                  start_unix_us=None, latency_jitter_us=3000):
     rows = []
     pid = 1
     time_us = 0
     dt = start_utc
+
+    # Compute expected airtime for this SF/BW/CR/payload config
+    airtime_us = semtech_airtime_us(sf, bw_khz, cr, payload_bytes)
+
+    # Base Unix-µs time for the first TX packet. If not provided, use
+    # the start_utc datetime converted to Unix-µs.
+    if start_unix_us is None:
+        start_unix_us = int(start_utc.replace(tzinfo=timezone.utc).timestamp() * 1_000_000)
 
     for (rx_lat, rx_lng) in rx_points:
         dist_m = haversine(tx_lat, tx_lng, rx_lat, rx_lng)
@@ -237,8 +265,10 @@ def generate_rows(rx_points, tx_lat, tx_lng, f_mhz, ptx, gt, gr, loss,
 
         if not drop:
             snr = snr_from_rssi(rssi, noise_floor, snr_sigma)
+            # GPS-PPS timestamps: TX at transmit, RX = TX + airtime + jitter
+            tx_gps_us = start_unix_us + time_us
+            rx_gps_us = tx_gps_us + airtime_us + int(random.gauss(0, latency_jitter_us))
             rows.append({
-                'event_time_us': time_us,
                 'time_valid': 1,
                 'utc_iso': dt.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'event_type': 2,
@@ -251,6 +281,8 @@ def generate_rows(rx_points, tx_lat, tx_lng, f_mhz, ptx, gt, gr, loss,
                 'snr_db': round(snr, 1),
                 'tx_lat_e7': lat_to_e7(tx_lat),
                 'tx_lng_e7': lng_to_e7(tx_lng),
+                'tx_gps_us': tx_gps_us,
+                'rx_gps_us': rx_gps_us,
             })
 
         pid += 1
@@ -388,6 +420,10 @@ def default_outpath(count, tx_lat, tx_lng):
 @click.option('--rssi-sigma', type=float, default=None, help='RSSI scatter sigma (dB)')
 @click.option('--snr-sigma', type=float, default=None, help='SNR scatter sigma (dB)')
 @click.option('--beacon', type=float, default=None, help='Beacon interval (s)')
+@click.option('--sf', type=click.Choice(['7', '8', '9', '10', '11', '12']), default=None,
+              help='LoRa spreading factor (for airtime/latency calculation)')
+@click.option('--bw', type=click.Choice(['125', '250', '500']), default=None,
+              help='LoRa bandwidth in kHz (for airtime/latency calculation)')
 @click.option('--nofix', type=int, default=None, help='Number of no-fix sentinel rows to inject')
 @click.option('--start-utc', type=str, default=None,
               help='Start datetime (YYYY-MM-DDTHH:MM:SS)')
@@ -401,7 +437,7 @@ def cli(**kwargs):
 def _main(interactive, preset, tx_lat, tx_lng, location, count, max_range,
           pattern, gap_rate, drop_curve, tx_power, tx_gain, rx_gain,
           cable_loss, freq, gps_noise, rssi_sigma, snr_sigma,
-          beacon, nofix, start_utc, out, seed, no_summary):
+          beacon, sf, bw, nofix, start_utc, out, seed, no_summary):
 
     cfg = {}
 
@@ -466,6 +502,14 @@ def _main(interactive, preset, tx_lat, tx_lng, location, count, max_range,
         cfg['count'] = click.prompt('  Packet count',
                                     default=cfg.get('count', 50),
                                     show_default=True, type=int)
+
+        click.echo('  ── LoRa Modem (for airtime/latency) ──')
+        cfg['sf'] = click.prompt('  Spreading factor (7-12)',
+                                 default=cfg.get('sf', 12),
+                                 show_default=True, type=int)
+        cfg['bw'] = click.prompt('  Bandwidth (125/250/500 kHz)',
+                                 default=cfg.get('bw', 125),
+                                 show_default=True, type=int)
 
         click.echo('  ── RF Parameters (optional) ──')
         cfg['tx_power'] = click.prompt('  TX power (dBm)',
@@ -535,6 +579,8 @@ def _main(interactive, preset, tx_lat, tx_lng, location, count, max_range,
             'cable_loss': cable_loss, 'freq': freq,
             'gps_noise': gps_noise, 'rssi_sigma': rssi_sigma,
             'snr_sigma': snr_sigma, 'beacon': beacon,
+            'sf': int(sf) if sf is not None else None,
+            'bw': int(bw) if bw is not None else None,
             'nofix': nofix, 'seed': seed,
         }
 
@@ -559,6 +605,7 @@ def _main(interactive, preset, tx_lat, tx_lng, location, count, max_range,
             ('cable_loss', 'cable_loss'), ('freq', 'freq'),
             ('gps_noise', 'gps_noise'), ('rssi_sigma', 'rssi_sigma'),
             ('snr_sigma', 'snr_sigma'), ('beacon', 'beacon'),
+            ('sf', 'sf'), ('bw', 'bw'),
             ('nofix', 'nofix'), ('seed', 'seed'),
         ]:
             val = params.get(attr)
@@ -591,6 +638,8 @@ def _main(interactive, preset, tx_lat, tx_lng, location, count, max_range,
     cfg.setdefault('rssi_sigma', 3.0)
     cfg.setdefault('snr_sigma', 2.0)
     cfg.setdefault('beacon', BEACON_INTERVAL_DEFAULT)
+    cfg.setdefault('sf', 12)
+    cfg.setdefault('bw', 125)
     cfg.setdefault('nofix', 0)
     cfg.setdefault('start_utc', datetime.now(timezone.utc).replace(tzinfo=None))
     cfg.setdefault('out', default_outpath(cfg['count'], cfg['tx_lat'], cfg['tx_lng']))
@@ -618,6 +667,8 @@ def _main(interactive, preset, tx_lat, tx_lng, location, count, max_range,
         gap_rate=cfg['gap_rate'],
         drop_curve_km=cfg['drop_curve'],
         max_range_km=cfg['max_range_km'],
+        sf=cfg['sf'],
+        bw_khz=cfg['bw'],
     )
 
     if cfg['nofix'] > 0 and rows:

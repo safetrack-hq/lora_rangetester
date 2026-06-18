@@ -10,7 +10,7 @@ import math
 import os
 import random
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
 
 # Allow importing gen_csv from the parent directory
@@ -315,7 +315,7 @@ class TestGenerateRows:
         rows = g.generate_rows(rx, tx[0], tx[1],
                                915, 22, 2.15, 2.15, 1,
                                2.0, datetime(2026, 6, 17, 14, 32, 0))
-        assert rows[1]['event_time_us'] == rows[0]['event_time_us'] + 2000000
+        assert rows[1]['gps_fix_time_us'] == rows[0]['gps_fix_time_us'] + 2000000
         assert rows[1]['utc_iso'] == '2026-06-17T14:32:02Z'
 
 
@@ -347,6 +347,106 @@ class TestInjectNofixRows:
         result = g.inject_nofix_rows(rows, count=1)
         nofix = [r for r in result if r['lat_e7'] == 0 or r['tx_lat_e7'] == 0]
         assert len(nofix) >= 1
+
+
+# =========================================================================
+# Airtime Model (Semtech SX1262)
+# =========================================================================
+class TestSemtechAirtime:
+    def test_sf12_125k_22b(self):
+        # SF12/125k/CR 4/5/22B payload, SX1262 preamble (6.25) → ~1384 ms
+        airtime = g.semtech_airtime_us(12, 125, 1, 22)
+        assert abs(airtime - 1384448) < 5000, f"airtime {airtime} µs"
+
+    def test_sf7_125k_22b(self):
+        # SF7/125k/22B → ~54 ms (much shorter)
+        airtime = g.semtech_airtime_us(7, 125, 1, 22)
+        assert abs(airtime - 53504) < 5000, f"airtime {airtime} µs"
+
+    def test_sf7_lower_than_sf12(self):
+        a7 = g.semtech_airtime_us(7, 125, 1, 22)
+        a12 = g.semtech_airtime_us(12, 125, 1, 22)
+        assert a7 < a12
+
+    def test_wider_bw_shorter_airtime(self):
+        a125 = g.semtech_airtime_us(12, 125, 1, 22)
+        a500 = g.semtech_airtime_us(12, 500, 1, 22)
+        assert a500 < a125
+
+
+# =========================================================================
+# GPS-PPS Latency Generation
+# =========================================================================
+class TestLatencyGeneration:
+    def test_rows_have_tx_gps_us_and_rx_gps_us(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        assert 'tx_gps_us' in rows[0]
+        assert 'rx_gps_us' in rows[0]
+        assert 'event_time_us' not in rows[0]
+
+    def test_rx_gps_after_tx_gps(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94), (33.44, -111.94), (33.45, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        for r in rows:
+            assert r['rx_gps_us'] > r['tx_gps_us'], \
+                f"rx {r['rx_gps_us']} should be > tx {r['tx_gps_us']}"
+
+    def test_latency_within_airtime_plus_jitter(self):
+        # SF12/125k/22B airtime ~1330 ms. With σ=3ms jitter, most
+        # latencies should be within 1.2-1.5 s.
+        tx = (33.4255, -111.94)
+        rx = [(33.43 + i * 0.01, -111.94) for i in range(20)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0),
+                               sf=12, bw_khz=125)
+        latencies_ms = [(r['rx_gps_us'] - r['tx_gps_us']) / 1000
+                        for r in rows]
+        for lat in latencies_ms:
+            # SF12/125k/22B airtime = 1384.4 ms; jitter σ=3ms
+            # Allow 1360-1410 ms (4σ range, 2*3ms)
+            assert 1360 < lat < 1410, f"latency {lat} ms out of range"
+
+    def test_sf7_lower_latency_than_sf12(self):
+        # Generate two datasets, one with SF7 and one with SF12
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94), (33.44, -111.94), (33.45, -111.94)]
+        random.seed(42)
+        rows7 = g.generate_rows(rx, tx[0], tx[1],
+                                915, 22, 2.15, 2.15, 1,
+                                1.5, datetime(2026, 6, 17, 14, 32, 0),
+                                sf=7, bw_khz=125)
+        random.seed(42)
+        rows12 = g.generate_rows(rx, tx[0], tx[1],
+                                 915, 22, 2.15, 2.15, 1,
+                                 1.5, datetime(2026, 6, 17, 14, 32, 0),
+                                 sf=12, bw_khz=125)
+        lat7 = (rows7[0]['rx_gps_us'] - rows7[0]['tx_gps_us']) / 1000
+        lat12 = (rows12[0]['rx_gps_us'] - rows12[0]['tx_gps_us']) / 1000
+        assert lat7 < lat12, f"SF7 latency {lat7} should be < SF12 {lat12}"
+
+    def test_tx_gps_us_uses_unix_epoch(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        # Unix-µs for 2026-06-17 14:32:00 UTC ≈ 1.78e15
+        expected_base = int(datetime(2026, 6, 17, 14, 32, 0,
+                                      tzinfo=timezone.utc).timestamp() * 1_000_000)
+        # First row's tx_gps_us should be close to expected (within beacon interval)
+        assert abs(rows[0]['tx_gps_us'] - expected_base) < 1_000_000
 
 
 # =========================================================================
@@ -514,8 +614,11 @@ class TestDefaults:
     def test_csv_header_has_all_required_fields(self):
         fields = g.CSV_HEADER.split(',')
         for f in ['lat_e7', 'lng_e7', 'tx_lat_e7', 'tx_lng_e7',
-                  'rssi_dbm', 'snr_db', 'packet_id', 'utc_iso']:
+                  'rssi_dbm', 'snr_db', 'packet_id', 'utc_iso',
+                  'tx_gps_us', 'rx_gps_us']:
             assert f in fields
+        # event_time_us was removed
+        assert 'event_time_us' not in fields
 
     def test_presets_exist(self):
         for name in ('minimal', 'gaps', 'nofix', 'realistic_short', 'realistic_long'):
