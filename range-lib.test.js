@@ -117,6 +117,11 @@ test('SENSITIVITY_125K: datasheet anchors SF7=-124, SF12=-137; monotonic descent
 const FW_HEADER = 'event_time_us,time_valid,utc_iso,event_type,node_id,packet_id,' +
                   'lat_e7,lng_e7,gps_fix_time_us,rssi_dbm,snr_db';
 
+// New-format header (with GPS-PPS timestamps, no event_time_us)
+const FW_HEADER_NEW = 'time_valid,utc_iso,event_type,node_id,packet_id,' +
+                      'lat_e7,lng_e7,gps_fix_time_us,rssi_dbm,snr_db,' +
+                      'tx_lat_e7,tx_lng_e7,tx_gps_us,rx_gps_us';
+
 // one firmware-format row helper (single GPS)
 function fwRow(pid, latE7, lngE7, rssi, snr) {
   return `1000,1,2026-01-01T00:00:00Z,2,1,${pid},${latE7},${lngE7},900,${rssi},${snr}`;
@@ -184,6 +189,61 @@ test('summarize: stats + delivery ratio from packet_id gaps', () => {
 
 test('summarize: empty input returns null (no crash)', () => {
   assert.equal(RL.summarize([]), null);
+});
+
+test('processRows: latency computed from tx_gps_us/rx_gps_us via BigInt', () => {
+  // SF12/125k/22B airtime ~1330ms. Simulate two packets 1s apart.
+  const header = FW_HEADER_NEW;
+  const row1 = '1,2026-06-17T16:38:24Z,2,1,1,334255000,-1119400000,0,-95.0,5.0,334255000,-1119400000,1718123456123000,1718123456124330';
+  const row2 = '1,2026-06-17T16:38:25Z,2,1,2,334255000,-1119400000,0,-95.0,5.0,334255000,-1119400000,1718123457123000,1718123457124280';
+  const { idx, rows } = RL.parseCSV(header + '\n' + row1 + '\n' + row2);
+  const pts = RL.processRows(idx, rows, null);
+  assert.equal(pts.length, 2);
+  // row1: 1718123456124330 - 1718123456123000 = 1330 us = 1.33 ms
+  assert.ok(Math.abs(pts[0].latencyMs - 1.33) < 0.01, `latency ${pts[0].latencyMs}`);
+  // row2: 1718123457124280 - 1718123457123000 = 1280 us = 1.28 ms
+  assert.ok(Math.abs(pts[1].latencyMs - 1.28) < 0.01, `latency ${pts[1].latencyMs}`);
+});
+
+test('processRows: missing tx_gps_us/rx_gps_us → latencyMs is NaN', () => {
+  // Old-format CSV without timestamp columns
+  const header = FW_HEADER;
+  const row = '1000,1,2026-01-01T00:00:00Z,2,1,1,334255000,-1119400000,900,-95.0,5.0';
+  const { idx, rows } = RL.parseCSV(header + '\n' + row);
+  const pts = RL.processRows(idx, rows, { lat: 33.4255, lng: -111.94 });
+  assert.equal(pts.length, 1);
+  assert.ok(Number.isNaN(pts[0].latencyMs), 'latencyMs should be NaN when columns absent');
+});
+
+test('processRows: BigInt subtraction handles large Unix-µs values exactly', () => {
+  // Simulate a packet in year 2030 (Unix-µs ~1.9e15)
+  const tx = 1924991999000000n;  // BigInt
+  const rx = 1924992000330000n;  // 1330ms later
+  const diffMs = Number(rx - tx) / 1000;
+  assert.equal(diffMs, 1330);
+});
+
+test('summarize: meanLatency and maxLatency from latencyMs', () => {
+  const pts = [
+    { dist: 100, rssi: -90, snr: 5, pid: 1, latencyMs: 1200.5 },
+    { dist: 200, rssi: -95, snr: 4, pid: 2, latencyMs: 1330.0 },
+    { dist: 300, rssi: -100, snr: 3, pid: 3, latencyMs: 1250.7 },
+  ];
+  const s = RL.summarize(pts);
+  assert.ok(s !== null);
+  // mean of 1200.5, 1330.0, 1250.7 = 3781.2 / 3 = 1260.4
+  assert.ok(Math.abs(s.meanLatency - 1260.4) < 0.1, `meanLatency ${s.meanLatency}`);
+  assert.equal(s.maxLatency, 1330.0);
+});
+
+test('summarize: missing latencyMs → meanLatency and maxLatency are null', () => {
+  const pts = [
+    { dist: 100, rssi: -90, snr: 5, pid: 1, latencyMs: NaN },
+    { dist: 200, rssi: -95, snr: 4, pid: 2, latencyMs: NaN },
+  ];
+  const s = RL.summarize(pts);
+  assert.equal(s.meanLatency, null);
+  assert.equal(s.maxLatency, null);
 });
 
 test('rssiColor: strong→green, near-floor→red, missing→grey', () => {
