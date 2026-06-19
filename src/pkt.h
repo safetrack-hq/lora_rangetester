@@ -28,10 +28,10 @@ struct Header {
 // 19 bytes
 struct LocationPacket {
 	struct Header;
-	int16_t rx_rssi; // / 1000
-	int16_t rx_snr; // / 1000
-	int32_t gps_lng; // / 1000
-	int32_t gps_lat; // / 1000
+	int16_t rx_rssi; // / 10
+	int16_t rx_snr; // / 10
+	int32_t gps_lng; // / 10000000
+	int32_t gps_lat; // / 10000000
 	uint8_t gps_numSat;
 	uint8_t gps_avgGsvSnr;
 }__attribute__((packed));

@@ -1,4 +1,5 @@
 // SDCARD_SS_PIN is defined for the built-in SD on some boards.
+#include "TypeDef.h"
 #include <Arduino.h>
 #include <SPI.h>
 #include <TinyGPSPlus.h>
@@ -7,6 +8,7 @@
 #include <SdFat.h>
 
 #include <RadioLib.h>
+#include "pkt.h"
 
 
 // Try max SPI clock for an SD. Reduce SPI_CLOCK if errors occur.
@@ -55,6 +57,7 @@ typedef FsFile file_t;
 
 
 SX1262 radio = new Module(SX126X_CS, SX126X_DIO1, SX126X_RESET, SX126X_BUSY);
+uint8_t rxBuffer[64];
 
 constexpr uint8_t RX_GPS_PIN = 22;
 constexpr uint8_t TX_GPS_PIN = 20;
@@ -62,7 +65,7 @@ constexpr uint8_t PPS_GPS_PIN = 31;
 //constexpr uint8_t SD_CS_PIN = 24;
 
 constexpr uint16_t LOG_BUFFER_LEN = 512; // in bytes
-const char* logFileHeader = "event_time_us,time_valid,utc_iso,event_type,node_id,packet_id,lat_e7,lng_e7,gps_fix_time_us,rssi_dbm,snr_db\n";
+const char* logFileHeader = "event_time_us,time_valid,utc_iso,event_type,node_id,packet_id,lat_e7,lng_e7,gps_fix_time_us,rssi_dbm,snr_db\n"; // file header
 char logBuffer[LOG_BUFFER_LEN];
 size_t logIndex = 0;
 
@@ -90,6 +93,7 @@ struct LogEvent {
     uint16_t gpsAgeMs;
     int16_t rssiDbm;
     int8_t snrDb;
+	uint8_t packetLen;
 };
 
 GpsFix latestFix;
@@ -114,6 +118,9 @@ struct RadioIrqEvent {
 	RadioIrqType type;
 	uint32_t microsAtIrq;
 };
+uint16_t rejectedBadLength;
+uint16_t rejectedCrc;
+uint16_t rejectedForeign;
 
 // FUNCTION DECLARATIONS
 void setup(void);
@@ -140,9 +147,9 @@ void txTelemetry(void* parameter){
 }
 
 void blinkLED(void* parameter){
-	Serial.println("led task");
-	vTaskDelete(nullptr);
+	//vTaskDelete(nullptr);
 	while(1){
+		Serial.println("led task");
 		digitalWrite(LED_BUILTIN, HIGH);
 		vTaskDelay(pdMS_TO_TICKS(1000));
 		digitalWrite(LED_BUILTIN, LOW);
@@ -294,12 +301,99 @@ void onRadioDio1(void){
 }
 
 void lora_handleRx(void* parameter){
-	while(1){
-		if(loraRxFlag){
-			//xQue
+    RadioIrqEvent irq;
+	while (true) {
+		if (xQueueReceive(radioIrqQueue, &irq, portMAX_DELAY) == pdTRUE) {
+			switch (irq.type) {
+				case RADIO_IRQ_RX_DONE:
+					handleRxDone(irq.microsAtIrq);
+					break;
+
+				case RADIO_IRQ_TX_DONE:
+					handleTxDone(irq.microsAtIrq);
+					break;
+
+				case RADIO_IRQ_RX_TIMEOUT:
+					handleTimeout(irq.microsAtIrq);
+					break;
+
+				//case RADIO_IRQ_CRC_ERR:
+				//	handleCrcError(irq.microsAtIrq);
+				//	break;
+			}
 		}
-		vTaskDelay(pdMS_TO_TICKS(100));
 	}
+}
+
+void handle_location(const struct LocationPacket* loc, bool valid){
+	return;
+}
+
+void handle_ack(const struct AckPacket* ack){
+	return;
+}
+
+void handleRxDone(uint32_t irqMicros) {
+    uint64_t eventTimeUs = gpsTimeFromMicros(irqMicros);
+
+    // Read packet and metadata outside ISR
+	size_t rxLen = radio.getPacketLength();
+    int16_t rssi = radio.getRSSI();
+    float snrFloat = radio.getSNR();
+    int state = radio.readData(rxBuffer, rxLen);
+	
+	if(rxLen == 0 || rxLen > sizeof(rxBuffer)){
+		rejectedBadLength++;
+		return;
+	}
+
+	if(state != RADIOLIB_ERR_NONE){
+		
+	}
+
+	// possibilities:
+	// fails crc RADIOLIB_ERR_CRC_MISMATCH or other than err_none
+	// improper packet size, improper magic byte, invalid flag: handled by sftrk_validate_packet
+	// duplicated packet/old packet/stale packet
+	// finally, AckPacket/LocationPacket
+	sftrk_flag_t flag = sftrk_validate_packet(rxBuffer, rxLen);
+
+	if(flag == SFTRK_FLAG_INVALID){
+		radio.startReceive();
+		return;
+	}
+	switch (flag) {
+		case SFTRK_FLAG_INVALID:
+			rejectedForeign++;
+			return;
+		case SFTRK_FLAG_GPS_VALID:
+			handle_location((const struct LocationPacket*)rxBuffer, true);
+			break;
+		case SFTRK_FLAG_GPS_INVALID:
+			handle_location((const struct LocationPacket*)rxBuffer, false);
+			break;
+		case SFTRK_FLAG_ACK:
+			handle_ack((const struct AckPacket*)rxBuffer);
+			break;
+		default:
+			break;
+	}
+
+	// TODO: implement this in separated funcs for loc and/or ack
+    LogEvent log = {};
+    log.eventTimeUs = eventTimeUs;
+    log.timeValid = eventTimeUs != 0;
+    log.eventType = SFTRK_FLAG_GPS_VALID;
+    log.rssiDbm = rssi;
+    log.snrDb = (int8_t)round(snrFloat * 10);
+    log.packetLen = rxLen;
+
+    copyLatestGpsFix(&log.gps);
+
+    xQueueSend(logQueue, &log, 0);
+
+    // restart receive if needed
+    radio.startReceive();
 }
 
 void setup(void){
@@ -310,7 +404,6 @@ void setup(void){
 		delay(1);
 	}
 	Serial.println("genesis");
-	// bring up SX1262 then sleep it -> NSS high, MISO Hi-Z, shared SPI bus freed for SD
 	//int radioStatus = radio.begin();
 	//Serial.print("radio.begin="); Serial.println(radioStatus);
 	//if (radioStatus == RADIOLIB_ERR_NONE) radio.sleep();
@@ -329,16 +422,23 @@ void setup(void){
 
 	Serial.println("queues init");
 
+	int radio_status = radio.begin();
+	radio.setSyncWord(0x5F);
+	radio.setPreambleLength(8);
+	radio.setCRC(2);
+	radio.explicitHeader();
 
-	//xTaskCreate(
-	//		lora_handleRx,
-	//		"Handle Lora RX",
-	//		1024,
-	//		NULL,
-	//		4,
-	//		NULL
-	//		);
-	//Serial.println("handle init");
+
+	//if(radio_status == RADIOLIB_)
+	xTaskCreate(
+			lora_handleRx,
+			"Handle Lora RX",
+			1024,
+			NULL,
+			3,
+			NULL
+			);
+	Serial.println("handle init");
 
 	xTaskCreate(
 			txTelemetry,
