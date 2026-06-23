@@ -1,0 +1,1360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sftrk · LoRa Range Testing</title>
+
+<!-- Google Fonts: DM Serif Display, Work Sans, JetBrains Mono -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Work+Sans:wght@400;500;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+
+<!-- CDN deps (need internet when first opened) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+
+<!-- pure computation core (shared with the Node test suite) -->
+<script src="range-lib.js"></script>
+
+<style>
+/* ============================ tokens ============================ */
+:root{
+  --bg:#0d0812; --panel:#1a1226; --panel2:#221a30; --edge:#2d2538;
+  --ink:#e8e0f0; --dim:#a094b8; --accent:#e8a840; --accent2:#7a9e7e;
+  --good:#7a9e7e; --warn:#e8a840; --bad:#e05555; --mono:#d4c8e8;
+  --plum:#b8a0d0; --deep:#2a1f3a;
+}
+
+/* ============================ base / typography ============================ */
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;font:400 15px/1.65 'Work Sans',system-ui,-apple-system,sans-serif;
+  background:var(--bg);color:var(--ink);position:relative;min-height:100vh}
+body::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background:
+    radial-gradient(1000px 700px at 80% -15%,rgba(232,168,64,.04),transparent),
+    radial-gradient(900px 600px at 15% 100%,rgba(26,18,38,.7),transparent)}
+body::after{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.4;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E")}
+code,kbd,.mono{font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+h1,h2,h3{font-family:'DM Serif Display',Georgia,serif;line-height:1.2;font-weight:400}
+h2{margin-top:0;font-size:1.6rem;border:0;padding-bottom:0}
+h3{font-size:1.15rem;color:var(--accent);font-weight:400}
+a{color:var(--accent);transition:color .2s}
+a:hover{color:#f0c060}
+hr{border:0;height:1px;background:linear-gradient(90deg,transparent,var(--edge),transparent);margin:2rem 0}
+.vh{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0 0 0 0);white-space:nowrap;border:0}
+
+/* ============================ layout / shell ============================ */
+header{padding:2.6rem 1.2rem 1.6rem;border-bottom:1px solid var(--edge)}
+header .wrap{max-width:1180px;margin:0 auto}
+.brand{font-size:.7rem;letter-spacing:.3em;color:var(--plum);text-transform:uppercase}
+header h1{font-size:2.6rem;margin:.15rem 0 .1rem}
+header .sub{color:var(--dim);max-width:65ch;margin-left:1.2rem;line-height:1.5}
+header .tags{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.9rem;margin-left:2.5rem}
+.tag{display:inline-block;font-size:.72rem;padding:.15rem .55rem;border-radius:999px;
+  border:1px solid var(--edge);color:var(--dim);background:var(--panel)}
+
+main{max-width:1180px;margin:0 auto;padding:1.5rem 1.2rem 5rem;position:relative;z-index:1}
+section.sub{margin:2.4rem 0;scroll-margin-top:64px}
+section.sub:first-child{margin-top:1.4rem}
+.section-divider{display:flex;justify-content:center;gap:.5rem;margin:.4rem 0 -1rem;opacity:.25;user-select:none}
+.section-divider .d{width:3px;height:3px;border-radius:50%;background:var(--plum)}
+footer{max-width:1180px;margin:0 auto;padding:2rem 1.2rem;color:#7a7090;font-size:.82rem;border-top:1px solid var(--edge);text-align:center}
+
+/* ============================ tabs ============================ */
+.tabs{position:sticky;top:0;z-index:1000;background:rgba(13,8,18,.9);
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--edge)}
+.tabs .wrap{max-width:1180px;margin:0 auto;display:flex;gap:.2rem;padding:.45rem .8rem;
+  align-items:center;overflow-x:auto;scrollbar-width:thin}
+.tab{background:transparent;border:0;color:var(--dim);font:600 .92rem 'Work Sans',sans-serif;
+  padding:.5rem .9rem;border-radius:8px;cursor:pointer;white-space:nowrap;position:relative;
+  transition:color .2s,background .2s}
+.tab:hover{color:var(--ink);background:var(--panel)}
+.tab[aria-selected="true"]{color:var(--accent)}
+.tab[aria-selected="true"]::after{content:'';position:absolute;left:.7rem;right:.7rem;bottom:-.46rem;
+  height:2px;background:var(--accent);border-radius:1px}
+[role=tabpanel]{outline:none}
+[role=tabpanel][hidden]{display:none}
+
+/* ============================ components: panels / callouts ============================ */
+.panel{background:var(--panel);border:1px solid var(--edge);border-radius:12px;
+  padding:1.3rem 1.4rem;margin:1rem 0}
+.panel2{background:var(--panel2)}
+.panel-flat{background:transparent;border:0;padding:0;margin:1rem 0}
+.grid{display:grid;gap:1rem}
+.lead{color:var(--dim)}
+.callout{padding:.8rem 1rem;border-radius:0 9px 9px 0;margin:1rem 0;
+  border-left:2px solid var(--warn);
+  background:linear-gradient(90deg,rgba(232,168,64,.045),transparent)}
+.callout.info{border-color:var(--accent2);
+  background:linear-gradient(90deg,rgba(122,158,126,.045),transparent)}
+.callout.gap{border-color:var(--plum);
+  background:linear-gradient(90deg,rgba(184,160,208,.05),transparent)}
+.callout b{color:var(--ink)}
+
+/* ============================ components: tables (docs) ============================ */
+table{width:100%;border-collapse:collapse;font-size:.88rem;margin:.5rem 0}
+th,td{text-align:left;padding:.4rem .55rem;border-bottom:1px solid var(--edge)}
+th{color:var(--dim);font-weight:500}
+tr:nth-child(even){background:rgba(45,37,56,.25)}
+td.mono,th.mono{font-family:'JetBrains Mono',monospace}
+pre{background:var(--deep);border:1px solid var(--edge);border-radius:9px;
+  padding:.9rem 1rem;overflow:auto;font-size:.84rem;color:var(--mono)}
+.steps{position:relative;padding-left:.6rem}
+.steps::before{content:'';position:absolute;left:1rem;top:.6rem;bottom:.6rem;
+  width:1px;border-left:1px dotted rgba(232,168,64,.25)}
+.step{display:flex;gap:.8rem;margin:.9rem 0;position:relative}
+.step .n{flex:0 0 1.8rem;height:1.8rem;border-radius:50%;background:var(--accent);
+  color:#0d0812;font-weight:600;display:grid;place-items:center;font-size:.85rem;
+  position:relative;z-index:1}
+
+/* ============================ components: forms / buttons ============================ */
+.field{display:flex;flex-direction:column;gap:.25rem;margin:.5rem 0}
+.field label{font-size:.82rem;color:var(--dim);font-weight:500}
+.field .hint{font-size:.72rem;color:#7a7090}
+input,select{background:var(--deep);border:1px solid var(--edge);color:var(--ink);
+  border-radius:8px;padding:.5rem .65rem;font:inherit;width:100%;
+  transition:border-color .2s,box-shadow .2s}
+input:focus,select:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+input:hover,select:hover{border-color:#3d3050}
+button{background:var(--accent);color:#0d0812;border:0;border-radius:8px;
+  padding:.5rem 1rem;font-weight:600;cursor:pointer;font-family:'Work Sans',sans-serif;
+  transition:transform .15s,box-shadow .15s,background .15s}
+button:hover{transform:translateY(-1px);box-shadow:0 2px 8px rgba(232,168,64,.25)}
+button:active{transform:translateY(0)}
+button.ghost{background:var(--panel);color:var(--ink);border:1px solid var(--edge)}
+button.ghost:hover{background:var(--panel2);box-shadow:none}
+button.mini{padding:.2rem .55rem;font-size:.74rem;font-weight:500}
+button:disabled{opacity:.4;cursor:not-allowed;transform:none;box-shadow:none}
+.out{background:var(--deep);border:1px dashed var(--edge);border-radius:9px;padding:.8rem 1rem;margin-top:.7rem}
+.out .big{font-size:1.5rem;font-weight:600;color:var(--accent)}
+.out .row{display:flex;justify-content:space-between;gap:1rem;padding:.15rem 0;border-bottom:1px dotted var(--edge)}
+.out .row:last-child{border:0}
+.k{color:var(--dim)}
+.v{font-family:'JetBrains Mono',monospace;font-size:.92rem}
+.v.good{color:var(--good)}.v.warn{color:var(--warn)}.v.bad{color:var(--bad)}
+
+/* ============================ components: stats ============================ */
+.statgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.7rem;margin:1rem 0}
+.stat{background:var(--deep);border:1px solid var(--edge);border-radius:9px;padding:.7rem .9rem}
+.stat .l{font-size:.74rem;color:var(--dim)}
+.stat .n{font-size:1.3rem;font-weight:600}
+.stat.lead-stat .n{color:var(--accent)}
+
+/* ============================ components: drop zone ============================ */
+.drop{border:2px dashed var(--edge);border-radius:11px;padding:1.4rem;text-align:center;color:var(--dim);
+  cursor:pointer;transition:border-color .2s,background .2s,transform .15s}
+.drop:hover,.drop.drag{border-color:var(--accent);background:rgba(232,168,64,.06);color:var(--ink);transform:scale(1.005)}
+
+/* ============================ components: session chips ============================ */
+.sessions{display:flex;flex-wrap:wrap;gap:.5rem;margin:1rem 0 .2rem}
+.chip{display:inline-flex;align-items:center;gap:.5rem;background:var(--deep);
+  border:1px solid var(--edge);border-radius:999px;padding:.3rem .5rem .3rem .65rem;font-size:.82rem}
+.chip.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.chip .sw{width:.7rem;height:.7rem;border-radius:50%;flex:0 0 auto}
+.chip .nm{cursor:pointer;color:var(--ink);background:none;border:0;padding:0;font:inherit}
+.chip .ct{color:var(--dim);font-size:.74rem}
+.chip input[type=checkbox]{width:auto;margin:0;accent-color:var(--accent)}
+.chip .x{background:none;border:0;color:var(--dim);cursor:pointer;padding:0 .15rem;font-size:1rem;line-height:1}
+.chip .x:hover{color:var(--bad);transform:none;box-shadow:none}
+
+/* ============================ components: filter bar ============================ */
+.filterbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem 1.4rem}
+.filt-head{display:flex;justify-content:space-between;align-items:baseline;gap:.5rem}
+.filt-head label{font-size:.8rem;color:var(--dim);font-weight:500}
+.filt-val{font-family:'JetBrains Mono',monospace;font-size:.8rem;color:var(--ink)}
+.filt-sliders{display:flex;flex-direction:column;gap:.2rem;margin-top:.3rem}
+.filt input[type=range]{width:100%;padding:0;background:transparent;accent-color:var(--accent);height:1.1rem}
+.filt input[type=range]:disabled{opacity:.35}
+
+/* ============================ components: data table ============================ */
+.table-tools{display:flex;align-items:center;gap:.7rem;flex-wrap:wrap;margin-bottom:.6rem}
+.table-tools .spacer{flex:1 1 auto}
+.table-tools label{font-size:.8rem;color:var(--dim)}
+.table-tools select{width:auto}
+.tablescroll{max-height:min(60vh,520px);overflow:auto;border:1px solid var(--edge);border-radius:9px}
+#pktTable{margin:0;font-size:.84rem}
+#pktTable thead th{position:sticky;top:0;background:var(--panel2);z-index:1;cursor:pointer;
+  user-select:none;white-space:nowrap}
+#pktTable thead th .arrow{color:var(--accent);font-size:.7rem;margin-left:.2rem}
+#pktTable tbody tr{cursor:pointer}
+#pktTable tbody tr:hover,#pktTable tbody tr.hl{background:rgba(232,168,64,.12)}
+#pktTable td{font-family:'JetBrains Mono',monospace;white-space:nowrap}
+.rssicell{display:inline-flex;align-items:center;gap:.4rem}
+.rssicell .dot{width:.6rem;height:.6rem;border-radius:50%;flex:0 0 auto}
+.rssicell .bk{font-family:'Work Sans',sans-serif;font-size:.68rem;color:var(--dim);
+  border:1px solid var(--edge);border-radius:4px;padding:0 .25rem}
+.pager{display:flex;align-items:center;justify-content:center;gap:1rem;margin-top:.6rem}
+
+/* ============================ components: compare ============================ */
+.cmp{overflow:auto}
+.cmp table{font-size:.84rem}
+.cmp td,.cmp th{white-space:nowrap}
+.cmp td.val{font-family:'JetBrains Mono',monospace}
+.cmp td.best{color:var(--good)}
+.cmp td.worst{color:var(--dim)}
+.cmp .mark{font-size:.7rem;margin-left:.25rem}
+
+/* ============================ components: map layer toggle ============================ */
+.seg{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-bottom:.6rem}
+.seg-opt{display:inline-flex;align-items:center;gap:.35rem;font-size:.82rem;color:var(--dim);
+  background:var(--deep);border:1px solid var(--edge);border-radius:8px;padding:.3rem .6rem;cursor:pointer}
+.seg-opt input{width:auto;margin:0;accent-color:var(--accent)}
+.seg-opt:hover{color:var(--ink);border-color:#3d3050}
+.chart-head{display:flex;justify-content:space-between;align-items:center;gap:.5rem}
+.chart-head h3{margin:0}
+.actions{display:flex;gap:.6rem;flex-wrap:wrap;margin-top:1.2rem}
+
+/* ============================ map ============================ */
+#map{height:clamp(280px,48vh,520px);border-radius:10px;border:1px solid var(--edge);margin-top:.4rem}
+.leaflet-popup-content-wrapper,.leaflet-popup-tip{background:var(--panel);color:var(--ink)}
+.legend{display:flex;gap:.8rem;flex-wrap:wrap;font-size:.8rem;color:var(--dim);margin-top:.5rem}
+.legend i{display:inline-block;width:.8rem;height:.8rem;border-radius:50%;margin-right:.3rem;vertical-align:middle}
+canvas{max-width:100%}
+.muted{color:var(--dim)}
+small.note{color:#7a7090}
+
+/* ============================ utilities + focus-visible ============================ */
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.tab:focus-visible,button:focus-visible,.drop:focus-visible,
+#pktTable thead th:focus-visible,.chip .nm:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ============================ animations ============================ */
+@keyframes revealUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+[role=tabpanel]:not([hidden]){animation:revealUp .42s ease-out both}
+#tab-reference:not([hidden]) .sub{animation:revealUp .5s ease-out both}
+#tab-reference:not([hidden]) .sub:nth-of-type(2){animation-delay:.07s}
+#tab-reference:not([hidden]) .sub:nth-of-type(3){animation-delay:.14s}
+
+/* ============================ media queries ============================ */
+@media(min-width:1024px){.cols2{grid-template-columns:1fr 1fr}.cols3{grid-template-columns:1fr 1fr 1fr}}
+@media(min-width:640px) and (max-width:1023px){.cols2{grid-template-columns:1fr 1fr}.cols3{grid-template-columns:1fr 1fr}}
+@media(max-width:780px){
+  header h1{font-size:1.8rem}
+  header .sub{margin-left:0}
+  header .tags{margin-left:0}
+  .tab{font-size:.85rem;padding:.45rem .7rem}
+}
+@media(max-width:600px){
+  .filterbar{grid-template-columns:1fr}
+  #map{height:clamp(240px,42vh,360px)}
+}
+@media(prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *,[role=tabpanel]:not([hidden]),.sub{animation:none!important;transition:none!important}
+  button:hover,.drop:hover{transform:none}
+}
+@media print{
+  .tabs,.drop,.table-tools button,.actions,.seg,.filterbar,.pager,header .tags{display:none!important}
+  [role=tabpanel][hidden]{display:block!important}
+  body::before,body::after{display:none}
+  body{background:#fff;color:#000}
+  .panel{break-inside:avoid}
+}
+</style>
+</head>
+<body>
+
+<header><div class="wrap">
+  <span class="brand">sftrk</span>
+  <h1>Field Range Testing Suite</h1>
+  <p class="sub">How the SX1262 / nice!nano range-test rig works, how to run a test in the field, and the
+     calculators + log processor that turn raw SD-card CSV into a measured range curve.</p>
+  <div class="tags">
+    <span class="tag">915 MHz · FCC</span><span class="tag">SX1262 (HT-RA62)</span>
+    <span class="tag">nRF52840 nice!nano</span><span class="tag">GPS-tagged packets</span>
+  </div>
+</div></header>
+
+<nav class="tabs"><div class="wrap" role="tablist" aria-label="Sections">
+  <button class="tab" role="tab" id="tab-analyze-btn"   aria-controls="tab-analyze"   aria-selected="true"  tabindex="0">Analyze</button>
+  <button class="tab" role="tab" id="tab-calc-btn"      aria-controls="tab-calc"      aria-selected="false" tabindex="-1">Calculators</button>
+  <button class="tab" role="tab" id="tab-reference-btn" aria-controls="tab-reference" aria-selected="false" tabindex="-1">Reference</button>
+</div></nav>
+
+<main>
+
+<!-- ====================================================================== -->
+<!-- ============================ TAB: ANALYZE ============================ -->
+<!-- ====================================================================== -->
+<section role="tabpanel" id="tab-analyze" aria-labelledby="tab-analyze-btn" tabindex="0">
+  <h2 id="logproc">Log Processor</h2>
+  <p class="lead">Drop one or more RX CSVs from the SD card. Computes per-packet distance (RX GPS ↔ TX GPS),
+  builds RSSI/SNR-vs-distance plots, maps every packet colored by signal, and reports max range &amp;
+  delivery ratio. Filter and sort interactively; load several files to compare runs. Everything runs
+  locally in your browser — nothing is uploaded.</p>
+
+  <div class="panel">
+    <div id="drop" class="drop" role="button" tabindex="0" aria-label="Choose or drop a CSV file">
+      <b>Drop CSV here</b> or click to choose · <span class="muted">drop more to compare · also accepts the legacy single-GPS log</span>
+      <input id="file" type="file" accept=".csv,text/csv" multiple hidden>
+    </div>
+
+    <div class="sessions" id="sessions" style="display:none" aria-label="Loaded sessions"></div>
+
+    <div class="callout info" id="refbox" style="display:none">
+      <b>Single-GPS log detected</b> — no <code>tx_lat_e7/tx_lng_e7</code> columns. Enter the fixed
+      base/reference coordinate to measure distance against:
+      <div class="grid cols2" style="margin-top:.6rem">
+        <div class="field"><label for="ref_lat">Reference latitude</label><input id="ref_lat" type="number" step="any" placeholder="e.g. 37.7749"></div>
+        <div class="field"><label for="ref_lng">Reference longitude</label><input id="ref_lng" type="number" step="any" placeholder="e.g. -122.4194"></div>
+      </div>
+      <button class="ghost" id="ref_apply">Apply reference</button>
+    </div>
+
+    <div id="results" style="display:none">
+
+      <!-- filter / brush bar -->
+      <div class="panel2 panel">
+        <div class="chart-head"><h3>Filter</h3><button class="ghost mini" id="filtReset">Reset filters</button></div>
+        <p class="muted" style="margin:.2rem 0 .9rem;font-size:.82rem">Brushing the active session — stats, charts, map and table update together.</p>
+        <div class="filterbar" id="filterbar"></div>
+      </div>
+
+      <div class="statgrid" id="stats"></div>
+
+      <div class="grid cols3">
+        <div class="panel2 panel"><div class="chart-head"><h3>RSSI vs distance</h3><button class="ghost mini" data-png="chRssi" aria-label="Export RSSI chart as PNG">PNG</button></div><canvas id="chRssi" height="220"></canvas></div>
+        <div class="panel2 panel"><div class="chart-head"><h3>SNR vs distance</h3><button class="ghost mini" data-png="chSnr" aria-label="Export SNR chart as PNG">PNG</button></div><canvas id="chSnr" height="220"></canvas></div>
+        <div class="panel2 panel"><div class="chart-head"><h3>Latency vs distance</h3><button class="ghost mini" data-png="chLat" aria-label="Export latency chart as PNG">PNG</button></div><canvas id="chLat" height="220"></canvas></div>
+      </div>
+      <small class="note" style="display:block;margin-top:.4rem">Latency = (rx_gps_us − tx_gps_us) / 1000. Requires GPS-PPS-synced timestamps in the CSV.</small>
+
+      <!-- compare panel (>=2 sessions) -->
+      <div class="panel cmp" id="comparePanel" style="display:none">
+        <h3>Session comparison</h3>
+        <div id="compareTable"></div>
+        <small class="note"><span class="mark">▲</span> = best of the loaded sessions for that metric.</small>
+      </div>
+
+      <!-- map -->
+      <h3 style="margin-top:1.4rem">Map</h3>
+      <div class="seg" role="radiogroup" aria-label="Map layer mode">
+        <label class="seg-opt"><input type="radio" name="layer" value="markers" checked> Markers</label>
+        <label class="seg-opt"><input type="radio" name="layer" value="points"> RSSI points</label>
+        <label class="seg-opt"><input type="radio" name="layer" value="heatmap"> Heatmap</label>
+        <label class="seg-opt"><input type="checkbox" id="togglelines" checked> TX→RX lines</label>
+      </div>
+      <div id="map"></div>
+      <div class="legend" id="legend"></div>
+
+      <!-- data table -->
+      <div class="panel" style="margin-top:1.2rem">
+        <div class="table-tools">
+          <label for="pageSize">Rows</label>
+          <select id="pageSize"><option>50</option><option selected>100</option><option>250</option><option value="0">All</option></select>
+          <span id="tableStatus" class="muted" aria-live="polite"></span>
+          <span class="spacer"></span>
+          <button class="ghost" id="copyMd">Copy summary (Markdown)</button>
+          <button class="ghost" id="dl">Download CSV (filter)</button>
+        </div>
+        <div class="tablescroll">
+          <table id="pktTable"><caption class="vh">Received packets for the active session</caption>
+            <thead id="pktHead"></thead><tbody id="pktBody"></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button class="ghost" id="prevPage">‹ Prev</button>
+          <span id="pageInfo" class="muted"></span>
+          <button class="ghost" id="nextPage">Next ›</button>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="ghost" id="reset">Clear all sessions</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================== -->
+<!-- ========================== TAB: CALCULATORS ========================== -->
+<!-- ====================================================================== -->
+<section role="tabpanel" id="tab-calc" aria-labelledby="tab-calc-btn" tabindex="0" hidden>
+
+  <section class="sub" id="calc-link">
+    <h2>Link Budget Calculator</h2>
+    <p class="lead">Predicts the theoretical free-space range from Tx power, antenna gains, and the
+    receiver sensitivity for the chosen spreading factor. Free-space is an <b>optimistic ceiling</b>:
+    ground reflection, foliage, and terrain cut it sharply.</p>
+    <div class="panel grid cols2">
+      <div>
+        <div class="field"><label for="lb_f">Frequency (MHz)</label><input id="lb_f" type="number" value="915" step="1"></div>
+        <div class="field"><label for="lb_ptx">Tx power (dBm)</label><input id="lb_ptx" type="number" value="22" step="0.5">
+          <span class="hint">SX1262 max +22 dBm</span></div>
+        <div class="field"><label for="lb_gt">Tx antenna gain (dBi)</label><input id="lb_gt" type="number" value="2.15" step="0.1"></div>
+        <div class="field"><label for="lb_gr">Rx antenna gain (dBi)</label><input id="lb_gr" type="number" value="2.15" step="0.1"></div>
+      </div>
+      <div>
+        <div class="field"><label for="lb_loss">Cable / connector loss, both ends (dB)</label><input id="lb_loss" type="number" value="1" step="0.5"></div>
+        <div class="field"><label for="lb_sf">Spreading factor / sensitivity (BW 125 kHz)</label>
+          <select id="lb_sf">
+            <option value="-124">SF7 — −124 dBm</option>
+            <option value="-127">SF8 — −127 dBm</option>
+            <option value="-130">SF9 — −130 dBm</option>
+            <option value="-133">SF10 — −133 dBm</option>
+            <option value="-135.5">SF11 — −135.5 dBm</option>
+            <option value="-137" selected>SF12 — −137 dBm</option>
+          </select><span class="hint">SX1262 datasheet Table 3-8, 125 kHz, RX Boosted</span></div>
+        <div class="field"><label for="lb_fade">Fade margin (dB)</label><input id="lb_fade" type="number" value="10" step="1">
+          <span class="hint">headroom for fading; 10–20 typical</span></div>
+      </div>
+    </div>
+    <div class="panel out" id="lb_out"></div>
+    <small class="note">FSPL(dB) = 20·log₁₀(d<sub>km</sub>) + 20·log₁₀(f<sub>MHz</sub>) + 32.44.
+    Max path loss = Ptx + Gt + Gr − loss − fade − sensitivity. Range solved from FSPL.</small>
+  </section>
+
+  <div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
+
+  <section class="sub" id="calc-fresnel">
+    <h2>Fresnel Zone Calculator</h2>
+    <p class="lead">Even with line-of-sight, the link needs clearance through the 1st Fresnel zone, and
+    beyond the radio horizon the earth's curvature blocks it entirely. Use this to pick antenna heights.</p>
+    <div class="panel grid cols2">
+      <div>
+        <div class="field"><label for="fr_f">Frequency (MHz)</label><input id="fr_f" type="number" value="915"></div>
+        <div class="field"><label for="fr_d">Path distance (km)</label><input id="fr_d" type="number" value="5" step="0.1"></div>
+      </div>
+      <div>
+        <div class="field"><label for="fr_h1">TX antenna height (m)</label><input id="fr_h1" type="number" value="2" step="0.5"></div>
+        <div class="field"><label for="fr_h2">RX antenna height (m)</label><input id="fr_h2" type="number" value="2" step="0.5"></div>
+      </div>
+    </div>
+    <div class="panel out" id="fr_out"></div>
+    <small class="note">F₁ at midpoint (m) = 8.657·√(d<sub>km</sub>/f<sub>GHz</sub>); 60% clearance is the
+    practical minimum. Radio horizon (4/3-earth) d<sub>km</sub> = 4.12·(√h₁ + √h₂), h in m.</small>
+  </section>
+
+  <div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
+
+  <section class="sub" id="calc-toa">
+    <h2>Airtime Calculator</h2>
+    <p class="lead">Airtime sets your beacon cadence and, on duty-limited bands, your legal max. Bigger SF
+    = more range but longer airtime = fewer packets/sec and coarser distance sampling.</p>
+    <div class="panel grid cols3">
+      <div>
+        <div class="field"><label for="ta_sf">Spreading factor</label>
+          <select id="ta_sf"><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option selected>12</option></select></div>
+        <div class="field"><label for="ta_bw">Bandwidth (kHz)</label>
+          <select id="ta_bw"><option>125</option><option>250</option><option>500</option></select></div>
+        <div class="field"><label for="ta_cr">Coding rate 4/(4+x)</label>
+          <select id="ta_cr"><option value="1" selected>4/5</option><option value="2">4/6</option><option value="3">4/7</option><option value="4">4/8</option></select></div>
+      </div>
+      <div>
+        <div class="field"><label for="ta_pl">Payload (bytes)</label><input id="ta_pl" type="number" value="14"></div>
+        <div class="field"><label for="ta_pre">Preamble symbols</label><input id="ta_pre" type="number" value="8"></div>
+        <div class="field"><label for="ta_period">Beacon period (s)</label><input id="ta_period" type="number" value="1" step="0.1"></div>
+      </div>
+      <div>
+        <div class="field"><label for="ta_ih">Explicit header</label>
+          <select id="ta_ih"><option value="0" selected>yes (explicit)</option><option value="1">no (implicit)</option></select></div>
+        <div class="field"><label for="ta_crc">CRC on</label>
+          <select id="ta_crc"><option value="1" selected>yes</option><option value="0">no</option></select></div>
+        <div class="field"><label for="ta_ldro">Low-data-rate optimize</label>
+          <select id="ta_ldro"><option value="-1" selected>auto (SF11/12@125k)</option><option value="1">force on</option><option value="0">force off</option></select></div>
+      </div>
+    </div>
+    <div class="panel out" id="ta_out"></div>
+    <small class="note">Semtech LoRa airtime model, SX1262 preamble (n+6.25 symbols — the SX126x
+    modem adds 2 symbols vs SX127x). Note: 915 MHz (FCC) has no fixed duty cycle but a 400 ms
+    dwell-time limit on frequency-hopping; airtime still bounds packets/sec.</small>
+  </section>
+
+  <div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
+
+  <section class="sub" id="calc-dist">
+    <h2>Distance Calculator</h2>
+    <p class="lead">Great-circle distance + initial bearing between two coordinates. The same haversine
+    the log processor uses per row. Paste decimal degrees.</p>
+    <div class="panel grid cols2">
+      <div>
+        <div class="field"><label for="d_lat1">Point A — latitude</label><input id="d_lat1" type="number" value="37.7749" step="any"></div>
+        <div class="field"><label for="d_lng1">Point A — longitude</label><input id="d_lng1" type="number" value="-122.4194" step="any"></div>
+      </div>
+      <div>
+        <div class="field"><label for="d_lat2">Point B — latitude</label><input id="d_lat2" type="number" value="37.8044" step="any"></div>
+        <div class="field"><label for="d_lng2">Point B — longitude</label><input id="d_lng2" type="number" value="-122.2712" step="any"></div>
+      </div>
+    </div>
+    <div class="panel out" id="d_out"></div>
+  </section>
+
+</section>
+
+<!-- ====================================================================== -->
+<!-- =========================== TAB: REFERENCE =========================== -->
+<!-- ====================================================================== -->
+<section role="tabpanel" id="tab-reference" aria-labelledby="tab-reference-btn" tabindex="0" hidden>
+
+  <section class="sub" id="how">
+    <h2>Range Testing Overview</h2>
+    <p class="lead">Two identical radios. One transmits GPS-stamped beacon packets on a fixed cadence;
+    the other receives them, measures signal quality (RSSI / SNR), and logs both ends' positions to its
+    microSD card. Drive or walk the nodes apart until the link breaks. The farthest distance still
+    delivering good packets is the measured range.</p>
+
+    <div class="grid cols2">
+      <div class="panel">
+        <h3>Roles</h3>
+        <table>
+          <tr><th>Node</th><th>Job</th></tr>
+          <tr><td class="mono">TX (beacon)</td><td>Every <em>T</em> seconds, sample its GPS, build a
+            packet <b>containing its own lat/lng + a monotonic packet_id</b>, transmit.</td></tr>
+          <tr><td class="mono">RX (logger)</td><td>On each received packet: read RSSI &amp; SNR, sample
+            its <em>own</em> GPS, parse the TX's GPS out of the payload, write one CSV row. Missing
+            packet_ids = losses.</td></tr>
+        </table>
+        <p class="muted">Both ends run the same firmware; <code>NODE_ID</code> + a runtime role flag pick
+        TX vs RX. Either node can be the static "base"; the other roves.</p>
+      </div>
+
+      <div class="panel">
+        <h3>Why GPS lives in the payload</h3>
+        <p>Range = distance between the <b>two antennas at the instant of the packet</b>. Putting the TX
+        position inside the payload means a <b>single RX log file is self-sufficient</b>: every row already
+        has both endpoints (RX GPS from the local module, TX GPS from the payload). No clock-syncing two
+        logs, no post-hoc GPX join.</p>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Hardware &amp; firmware (this repo)</h3>
+      <div class="grid cols2">
+        <div>
+          <table>
+            <tr><th>Block</th><th>Part / pins</th></tr>
+            <tr><td>MCU</td><td class="mono">nice!nano — nRF52840</td></tr>
+            <tr><td>Radio</td><td class="mono">HT-RA62 (SX1262), shared SPI</td></tr>
+            <tr><td>GPS</td><td class="mono">UART P0.20 RX / P0.22 TX @9600</td></tr>
+            <tr><td>Storage</td><td class="mono">microSD, SPI CS P0.11</td></tr>
+          </table>
+        </div>
+        <div>
+          <p class="muted">FreeRTOS tasks: <code>gpsPoll</code> (TinyGPS++ decode → shared
+          <code>latestFix</code> under mutex), <code>lora_handleRx</code> (DIO1 ISR →
+          <code>radioIrqQueue</code> → read packet + RSSI/SNR), <code>writeLogTask</code>
+          (drains <code>logQueue</code> → 512&nbsp;B buffer → SD, periodic <code>flush()</code> sync).</p>
+          <p class="muted">SX1262 and SD share one SPI bus: bring the radio up then
+          <code>sleep()</code> it (NSS high → MISO Hi-Z) before SD I/O.</p>
+        </div>
+      </div>
+      <div class="callout gap">
+        <b>Firmware gap (intended vs current).</b> The payload-GPS design above requires the TX coordinates
+        to be parsed from the packet and written as extra CSV columns
+        (<code>tx_lat_e7</code>, <code>tx_lng_e7</code>). Current <code>src/main.cpp</code> defines a
+        single-GPS header and its <code>logQueue</code> consumer isn't wired yet — the log processor
+        therefore <b>also accepts a single-GPS CSV plus a fixed "reference point"</b> so you can test the
+        tooling before the firmware catches up.
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
+
+  <section class="sub" id="packet">
+    <h2>Packet Format</h2>
+
+    <div class="grid cols2">
+      <div class="panel">
+        <h3>Beacon payload (TX → air)</h3>
+        <p class="muted">Compact fixed layout — carries TX position and GPS-PPS-synced timestamp so the RX side can compute latency.</p>
+        <pre>struct Beacon {        // 22 bytes
+  uint8_t  node_id;    // who sent it
+  uint32_t packet_id;  // monotonic, for loss detection
+  int32_t  lat_e7;     // TX latitude  × 1e7
+  int32_t  lng_e7;     // TX longitude × 1e7
+  uint64_t tx_gps_us;  // TX GPS-synced Unix time, µs (since epoch)
+  uint8_t  flags;      // fix-valid, sats bucket, ...
+};</pre>
+        <small class="note">lat/lng as int32 ×1e7 ≈ 1.1&nbsp;cm resolution, no float on the wire. See <code>docs/PACKET_FORMAT.md</code> for full details.</small>
+      </div>
+
+      <div class="panel">
+        <h3>RX CSV row (logger → SD)</h3>
+        <p class="muted">Header written once per file. One row per received packet. GPS-PPS-synced timestamps enable latency measurement.</p>
+        <pre>time_valid,utc_iso,event_type,node_id,packet_id,
+rx_lat_e7,rx_lng_e7,          // local GPS (logger)
+tx_lat_e7,tx_lng_e7,          // from payload (beacon)
+gps_fix_time_us,rssi_dbm,snr_db,
+tx_gps_us,rx_gps_us           // GPS-synced Unix µs — latency = (rx − tx) / 1000</pre>
+        <small class="note">Filenames <code>N{node}_{seq}.csv</code> (e.g. <code>N02_0007.csv</code>),
+        sequential, never overwritten. See <code>docs/PACKET_FORMAT.md</code> for full spec.</small>
+      </div>
+    </div>
+
+    <div class="callout info">
+      <b>Loss / PDR.</b> The log records only <em>received</em> packets. Packet delivery ratio at a given
+      distance = received <code>packet_id</code>s ÷ expected span (max−min+1). Gaps in
+      <code>packet_id</code> are the dropped packets — the processor reports them per distance bin.
+    </div>
+  </section>
+
+  <div class="section-divider"><span class="d"></span><span class="d"></span><span class="d"></span></div>
+
+  <section class="sub" id="procedure">
+    <h2>Field Procedure</h2>
+    <div class="panel">
+      <div class="steps">
+      <div class="step"><div class="n">1</div><div><b>Pre-flight (bench).</b> Confirm both nodes get GPS
+        fix (sat count &gt; 4), TX is beaconing, RX is writing rows to a fresh CSV. Note SF/BW/CR and
+        Tx power — they decide sensitivity and time-on-air.</div></div>
+      <div class="step"><div class="n">2</div><div><b>Plan the route.</b> Use the
+        <a href="#calc-link">link-budget</a> calc for an expected range, and
+        <a href="#calc-fresnel">Fresnel / horizon</a> to sanity-check line-of-sight and antenna height
+        for that distance.</div></div>
+      <div class="step"><div class="n">3</div><div><b>Place the base.</b> Park one node at a known,
+        open, elevated spot. Record its exact coordinate (it's also in every payload, but write it down).</div></div>
+      <div class="step"><div class="n">4</div><div><b>Rove.</b> Move the other node outward along the
+        route. Keep antennas vertical and clear of the body/vehicle. Pause at markers so each distance
+        gets several packets.</div></div>
+      <div class="step"><div class="n">5</div><div><b>Find the edge.</b> Continue until RSSI approaches
+        sensitivity and packets start dropping. The last distance with acceptable PDR is the range for
+        that config.</div></div>
+      <div class="step"><div class="n">6</div><div><b>Recover &amp; process.</b> Power down cleanly (so
+        the SD flush commits), pull the card, drop the CSV into the
+        <a href="#logproc">log processor</a> for the range curve + map.</div></div>
+      </div>
+    </div>
+    <div class="callout">
+      <b>Watch RSSI vs. SNR.</b> LoRa decodes <em>below</em> the noise floor — SNR can be negative on good
+      packets. A packet that drops with RSSI still well above sensitivity points to interference or a
+      Fresnel/obstruction problem, not raw range.
+    </div>
+  </section>
+
+</section>
+
+</main>
+
+<footer>
+  sftrk LoRa range testing · single-file tool · calculators use the Semtech LoRa airtime model and
+  free-space path loss; predicted ranges are theoretical ceilings, field range is always lower.
+  Map tiles © OpenStreetMap contributors.
+</footer>
+
+<div class="vh" id="live" aria-live="polite"></div>
+
+<script>
+'use strict';
+/* =====================================================================
+ * shared helpers
+ * ===================================================================== */
+const $ = id => document.getElementById(id);
+const num = id => parseFloat($(id).value);
+const fmt = (x,d=2) => (isFinite(x) ? x.toFixed(d) : '—');
+const fmt0 = x => isFinite(x) ? Math.round(x).toString() : '—';
+const distLabel = m => !isFinite(m) ? '—' : (m>=1000 ? (m/1000).toFixed(2)+' km' : Math.round(m)+' m');
+const announce = msg => { $('live').textContent = msg; };
+const RL = RangeLib;   // pure math core (range-lib.js), shared with the test suite
+
+const SESSION_COLORS = ['#e8a840','#7a9e7e','#b8a0d0','#5fa8d3','#e0795f','#c9a227','#9b8bd0'];
+const METRIC_COLOR = { rssi:'#e8a840', snr:'#7a9e7e', latencyMs:'#b8a0d0' };
+
+/* =====================================================================
+ * Calc — the four RF calculators (pure-lib backed, recompute on input)
+ * ===================================================================== */
+const Calc = (() => {
+  function lb(){
+    const r = RL.linkBudget({
+      f:num('lb_f'), ptx:num('lb_ptx'), gt:num('lb_gt'), gr:num('lb_gr'),
+      loss:num('lb_loss'), sens:parseFloat($('lb_sf').value), fade:num('lb_fade')
+    });
+    const d_km = r.rangeKm;
+    const cls = d_km>=10?'good':d_km>=1?'warn':'bad';
+    $('lb_out').innerHTML =
+      `<div class="row"><span class="k">Max allowable path loss</span><span class="v">${fmt(r.maxPL,1)} dB</span></div>`+
+      `<div class="row"><span class="k">EIRP (approx)</span><span class="v">${fmt(r.eirp,1)} dBm</span></div>`+
+      `<div class="row"><span class="k">Link margin over sensitivity</span><span class="v">${fmt(r.margin,1)} dB</span></div>`+
+      `<div class="row"><span class="k">Theoretical free-space range</span>`+
+        `<span class="v ${cls} big">${d_km>=1?fmt(d_km,2)+' km':fmt(d_km*1000,0)+' m'}</span></div>`+
+      `<div class="row"><span class="k" style="font-size:.8rem">Realistic (÷5–10, ground/terrain)</span>`+
+        `<span class="v" style="font-size:.85rem">~${fmt(d_km/8,2)}–${fmt(d_km/4,2)} km</span></div>`;
+  }
+  function fr(){
+    const r = RL.fresnel({ f:num('fr_f'), d:num('fr_d'), h1:num('fr_h1'), h2:num('fr_h2') });
+    $('fr_out').innerHTML =
+      `<div class="row"><span class="k">1st Fresnel radius (midpoint)</span><span class="v">${fmt(r.F1,1)} m</span></div>`+
+      `<div class="row"><span class="k">60% clearance needed</span><span class="v">${fmt(r.clear60,1)} m</span></div>`+
+      `<div class="row"><span class="k">Radio horizon (4/3 earth)</span><span class="v">${fmt(r.horizon,2)} km</span></div>`+
+      `<div class="row"><span class="k">Path vs horizon</span>`+
+        `<span class="v ${r.beyond?'bad':'good'}">${r.beyond?'BEYOND horizon — blocked':'within horizon — LoS possible'}</span></div>`;
+  }
+  function toa(){
+    const r = RL.timeOnAir({
+      sf:parseInt($('ta_sf').value), bw:parseInt($('ta_bw').value),
+      cr:parseInt($('ta_cr').value), pl:num('ta_pl'), npre:num('ta_pre'),
+      ih:parseInt($('ta_ih').value), crc:parseInt($('ta_crc').value),
+      ldro:parseInt($('ta_ldro').value), period:num('ta_period')
+    });
+    const dutyCls = r.duty<=1?'good':r.duty<=10?'warn':'bad';
+    $('ta_out').innerHTML =
+      `<div class="row"><span class="k">Symbol time</span><span class="v">${fmt(r.Tsym*1000,3)} ms ${r.de?'· LDRO on':''}</span></div>`+
+      `<div class="row"><span class="k">Payload symbols</span><span class="v">${r.payloadSymb}</span></div>`+
+      `<div class="row"><span class="k">Time on air</span><span class="v big">${fmt(r.toaMs,1)} ms</span></div>`+
+      `<div class="row"><span class="k">Max rate (back-to-back)</span><span class="v">${fmt(r.maxRate,1)} pkt/s</span></div>`+
+      `<div class="row"><span class="k">Airtime at ${fmt(num('ta_period'),1)} s period</span><span class="v ${dutyCls}">${fmt(r.duty,2)} %</span></div>`;
+  }
+  function dcalc(){
+    const {dist,brg}=RL.haversine(num('d_lat1'),num('d_lng1'),num('d_lat2'),num('d_lng2'));
+    const compass=['N','NE','E','SE','S','SW','W','NW'][Math.round(brg/45)%8];
+    $('d_out').innerHTML =
+      `<div class="row"><span class="k">Distance</span><span class="v big">${dist>=1000?fmt(dist/1000,3)+' km':fmt(dist,1)+' m'}</span></div>`+
+      `<div class="row"><span class="k">also</span><span class="v">${fmt(dist,1)} m · ${fmt(dist/1609.344,3)} mi</span></div>`+
+      `<div class="row"><span class="k">Initial bearing</span><span class="v">${fmt(brg,1)}° (${compass})</span></div>`;
+  }
+  function init(){
+    ['lb_f','lb_ptx','lb_gt','lb_gr','lb_loss','lb_sf','lb_fade'].forEach(i=>$(i).oninput=lb);
+    ['fr_f','fr_d','fr_h1','fr_h2'].forEach(i=>$(i).oninput=fr);
+    ['ta_sf','ta_bw','ta_cr','ta_pl','ta_pre','ta_period','ta_ih','ta_crc','ta_ldro'].forEach(i=>$(i).oninput=toa);
+    ['d_lat1','d_lng1','d_lat2','d_lng2'].forEach(i=>$(i).oninput=dcalc);
+    lb(); fr(); toa(); dcalc();
+  }
+  return { init };
+})();
+
+/* =====================================================================
+ * State — single source of truth; every interaction mutates it then render()
+ * ===================================================================== */
+const State = {
+  sessions: [],            // [{id,name,processed,color,visible}]
+  activeId: null,
+  filter: { dist:null, rssi:null, snr:null, pid:null },
+  bounds: { dist:null, rssi:null, snr:null, pid:null },
+  layerMode: 'markers',    // markers | points | heatmap
+  sort: { key:'pid', dir:1 },
+  page: 0, pageSize: 100,
+  _seq: 0
+};
+const activeSession = () => State.sessions.find(s=>s.id===State.activeId) || null;
+const activePoints  = () => { const s=activeSession(); return s ? s.processed : []; };
+const filteredPoints= () => RL.filterPoints(activePoints(), State.filter);
+// the active session is always shown (it drives stats/table), so charts/map never
+// contradict the populated stats grid even if the user unticks its visibility box
+const shownSessions = () => State.sessions.filter(s=>s.visible || s.id===State.activeId);
+const viewPoints = s => s.id===State.activeId ? RL.filterPoints(s.processed, State.filter) : s.processed;
+const multi = () => State.sessions.length > 1;
+
+function initFilterBounds(){
+  ['dist','rssi','snr','pid'].forEach(k=>{
+    const vr = RL.valueRange(activePoints(), k);
+    State.bounds[k] = vr;
+    State.filter[k] = vr ? [vr.min, vr.max] : null;
+  });
+}
+
+function addSession(name, processed){
+  const id = ++State._seq;
+  const color = SESSION_COLORS[(State.sessions.length) % SESSION_COLORS.length];
+  processed.forEach((p,i)=>{ p._id = i; });   // stable per-point key for highlight (pid may be NaN)
+  const first = State.sessions.length===0;
+  State.sessions.push({ id, name, processed, color, visible:true });
+  State.activeId = id;
+  State.page = 0;
+  initFilterBounds();
+  Filters.build();
+  Chips.render();
+  render();
+  announce(`Loaded ${name}: ${processed.length} packets.`);
+  if(first) requestAnimationFrame(()=>$('results').scrollIntoView({behavior:'smooth',block:'start'}));
+}
+
+function setActive(id){
+  if(State.activeId===id) return;
+  State.activeId = id;
+  State.page = 0;
+  initFilterBounds();
+  Filters.build();
+  Chips.render();
+  render();
+}
+
+function removeSession(id){
+  const wasActive = (id===State.activeId);
+  State.sessions = State.sessions.filter(s=>s.id!==id);
+  if(wasActive){
+    State.activeId = State.sessions.length ? State.sessions[0].id : null;
+    State.page = 0;
+    if(State.sessions.length){ initFilterBounds(); Filters.build(); }  // only reset brush when the active changed
+  }
+  Chips.render();
+  render();
+}
+
+/* =====================================================================
+ * Chips — session strip (activate / toggle visibility / remove)
+ * ===================================================================== */
+const Chips = (() => {
+  function render(){
+    const box = $('sessions');
+    if(!State.sessions.length){ box.style.display='none'; box.innerHTML=''; return; }
+    box.style.display='flex';
+    box.innerHTML='';
+    State.sessions.forEach(s=>{
+      const chip=document.createElement('div');
+      chip.className='chip'+(s.id===State.activeId?' active':'');
+      const sw=document.createElement('span'); sw.className='sw'; sw.style.background=s.color;
+      const nm=document.createElement('button'); nm.className='nm'; nm.textContent=s.name;
+      nm.title='Make active'; nm.onclick=()=>setActive(s.id);
+      const ct=document.createElement('span'); ct.className='ct'; ct.textContent=s.processed.length+' pkt';
+      const isActive=s.id===State.activeId;
+      const vis=document.createElement('input'); vis.type='checkbox';
+      vis.checked = s.visible || isActive;
+      vis.disabled = isActive;     // active session is always shown
+      vis.title = isActive ? 'Active session is always shown' : 'Show on map/charts';
+      vis.setAttribute('aria-label','Show '+s.name+' on map and charts');
+      vis.onchange=()=>{ s.visible=vis.checked; window.render(); };
+      const x=document.createElement('button'); x.className='x'; x.textContent='×';
+      x.title='Remove session'; x.setAttribute('aria-label','Remove '+s.name); x.onclick=()=>removeSession(s.id);
+      chip.append(sw,nm,ct,vis,x);
+      box.appendChild(chip);
+    });
+  }
+  return { render };
+})();
+
+/* =====================================================================
+ * Filters — dual-slider brush bar bound to State.filter
+ * ===================================================================== */
+const Filters = (() => {
+  const META = [
+    { key:'dist', label:'Distance (m)', fmt:fmt0 },
+    { key:'rssi', label:'RSSI (dBm)',   fmt:fmt0 },
+    { key:'snr',  label:'SNR (dB)',     fmt:v=>fmt(v,1) },
+    { key:'pid',  label:'Packet ID',    fmt:fmt0 }
+  ];
+  function step(b,key){ if(key==='pid') return 1; const s=(b.max-b.min)/200; return s>0?s:1; }
+  function build(){
+    const bar=$('filterbar'); bar.innerHTML='';
+    META.forEach(m=>{
+      const b=State.bounds[m.key];
+      const wrap=document.createElement('div'); wrap.className='filt'; wrap.dataset.key=m.key;
+      const lblId='filt-'+m.key+'-lbl';
+      wrap.innerHTML =
+        `<div class="filt-head"><label id="${lblId}">${m.label}</label><span class="filt-val" id="filt-${m.key}-val"></span></div>`+
+        `<div class="filt-sliders">`+
+          `<input type="range" id="filt-${m.key}-min" aria-labelledby="${lblId}" aria-label="${m.label} minimum">`+
+          `<input type="range" id="filt-${m.key}-max" aria-labelledby="${lblId}" aria-label="${m.label} maximum">`+
+        `</div>`;
+      bar.appendChild(wrap);
+      const lo=$('filt-'+m.key+'-min'), hi=$('filt-'+m.key+'-max');
+      if(!b){ lo.disabled=hi.disabled=true; $('filt-'+m.key+'-val').textContent='—'; return; }
+      const st=step(b,m.key);
+      [lo,hi].forEach(el=>{ el.min=b.min; el.max=b.max; el.step=st; });
+      lo.value=State.filter[m.key][0]; hi.value=State.filter[m.key][1];
+      lo.oninput=()=>{ let a=parseFloat(lo.value),z=parseFloat(hi.value); if(a>z){a=z;lo.value=z;} State.filter[m.key]=[a,z]; window.render(); };
+      hi.oninput=()=>{ let a=parseFloat(lo.value),z=parseFloat(hi.value); if(z<a){z=a;hi.value=a;} State.filter[m.key]=[a,z]; window.render(); };
+    });
+    sync();
+  }
+  function sync(){
+    META.forEach(m=>{
+      const v=$('filt-'+m.key+'-val'); if(!v) return;
+      const r=State.filter[m.key];
+      v.textContent = r ? (m.fmt(r[0])+' – '+m.fmt(r[1])) : '—';
+    });
+  }
+  function reset(){
+    ['dist','rssi','snr','pid'].forEach(k=>{ const b=State.bounds[k]; State.filter[k]=b?[b.min,b.max]:null; });
+    build(); window.render(); announce('Filters reset.');
+  }
+  return { build, sync, reset };
+})();
+
+/* =====================================================================
+ * Stats — summary grid for the active (filtered) session
+ * ===================================================================== */
+const Stats = (() => {
+  const cell=(l,n,lead)=>`<div class="stat${lead?' lead-stat':''}"><div class="l">${l}</div><div class="n">${n}</div></div>`;
+  function render(fp){
+    const s = RL.summarize(fp);
+    if(!s){ $('stats').innerHTML = cell('Packets (filter)','0',true); return; }
+    $('stats').innerHTML =
+      cell('Packets (filter)', s.count, true)+
+      cell('Max range', distLabel(s.maxDist))+
+      cell('Best RSSI', s.bestRssi!=null?s.bestRssi+' dBm':'—')+
+      cell('Worst RSSI', s.worstRssi!=null?s.worstRssi+' dBm':'—')+
+      cell('Delivery ratio', s.pdr!=null?fmt(s.pdr,1)+'%':'—')+
+      cell('Mean latency', s.meanLatency!=null?fmt(s.meanLatency,1)+' ms':'—')+
+      cell('Max latency', s.maxLatency!=null?fmt(s.maxLatency,1)+' ms':'—')+
+      cell('Mean dist', distLabel(s.meanDist));
+  }
+  return { render };
+})();
+
+/* =====================================================================
+ * Charts — RSSI / SNR / latency scatter, one dataset per visible session
+ * ===================================================================== */
+const Charts = (() => {
+  const objs = {};   // metric -> {chart, idIdx:{_id:index}, activeDs:int}
+  function scatter(canvasId, datasets, axisLabel){
+    return new Chart($(canvasId), { type:'scatter',
+      data:{ datasets },
+      options:{ responsive:true, animation:false,
+        scales:{
+          x:{title:{display:true,text:'distance (km)'},ticks:{color:'#a094b8'},grid:{color:'#2d2538'}},
+          y:{title:{display:true,text:axisLabel},ticks:{color:'#a094b8'},grid:{color:'#2d2538'}}},
+        plugins:{ legend:{ display: datasets.length>1, labels:{color:'#e8e0f0'} } } } });
+  }
+  function build(metric, canvasId, axisLabel){
+    const vis = shownSessions();
+    const datasets = vis.map(s=>{
+      const pts = viewPoints(s).filter(p=>isFinite(p[metric]));
+      return { label:s.name,
+        data: pts.map(p=>({x:p.dist/1000, y:p[metric], id:p._id})),
+        backgroundColor: multi() ? s.color : METRIC_COLOR[metric],
+        pointRadius:3, pointHoverRadius:6 };
+    });
+    if(objs[metric] && objs[metric].chart) objs[metric].chart.destroy();
+    const chart = scatter(canvasId, datasets, axisLabel);
+    // index map for the active session's dataset (for row->chart highlight), keyed by stable _id
+    const activeDs = vis.findIndex(s=>s.id===State.activeId);
+    const idIdx = {};
+    if(activeDs>=0){ datasets[activeDs].data.forEach((d,i)=>{ idIdx[d.id]=i; }); }
+    objs[metric] = { chart, idIdx, activeDs };
+  }
+  function render(){
+    build('rssi','chRssi','RSSI (dBm)');
+    build('snr','chSnr','SNR (dB)');
+    build('latencyMs','chLat','Latency (ms)');
+  }
+  function highlight(id){
+    Object.values(objs).forEach(o=>{
+      if(o.activeDs<0) return;
+      const i=o.idIdx[id];
+      if(i==null){ o.chart.setActiveElements([]); o.chart.update(); return; }
+      o.chart.setActiveElements([{datasetIndex:o.activeDs,index:i}]);
+      o.chart.update();
+    });
+  }
+  function clear(){ Object.values(objs).forEach(o=>{ o.chart.setActiveElements([]); o.chart.update(); }); }
+  function png(canvasId){
+    const o=Object.values(objs).find(x=>x.chart.canvas.id===canvasId);
+    if(!o) return;
+    const a=document.createElement('a'); a.href=o.chart.toBase64Image('image/png',1);
+    a.download=canvasId+'.png'; a.click();
+  }
+  return { render, highlight, clear, png };
+})();
+
+/* =====================================================================
+ * MapView — Leaflet markers / RSSI points / hand-rolled heatmap
+ * ===================================================================== */
+const MapView = (() => {
+  let map=null, markersLayer=null, linesLayer=null, heatLayer=null;
+  let markersById={}, hl=null;
+  function ensure(){
+    if(map) return;
+    map=L.map('map',{keyboard:true});
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+      {maxZoom:19,attribution:'© OpenStreetMap contributors · © CARTO'}).addTo(map);
+  }
+  function cellMeters(pts){
+    if(pts.length<2) return 100;
+    let la0=Infinity,la1=-Infinity,lo0=Infinity,lo1=-Infinity;
+    pts.forEach(p=>{ la0=Math.min(la0,p.rxLat);la1=Math.max(la1,p.rxLat);lo0=Math.min(lo0,p.rxLng);lo1=Math.max(lo1,p.rxLng); });
+    const diag=RL.haversine(la0,lo0,la1,lo1).dist;
+    return Math.max(25, Math.min(3000, diag/25 || 100));
+  }
+  function render(){
+    ensure();
+    [markersLayer,linesLayer,heatLayer].forEach(l=>l&&l.remove());
+    markersLayer=L.layerGroup().addTo(map);
+    linesLayer=L.layerGroup();
+    heatLayer=L.layerGroup();
+    markersById={}; hl=null;
+    const bounds=[];
+    const shown=shownSessions();
+    const showLines = State.layerMode!=='heatmap' && $('togglelines').checked;
+
+    if(State.layerMode==='heatmap'){
+      const pts=shown.flatMap(viewPoints);   // all shown sessions, not just the active one
+      const cm=cellMeters(pts);
+      const cells=RL.gridBins(pts,{cellMeters:cm});
+      const maxC=cells.reduce((a,c)=>Math.max(a,c.count),1);
+      cells.forEach(c=>{
+        L.circle([c.lat,c.lng],{ radius:cm/2, stroke:false,
+          fillColor:RL.rssiColor(c.meanRssi), fillOpacity:0.25+0.55*(c.count/maxC) })
+          .bindPopup(`${c.count} pkt · mean RSSI ${c.meanRssi!=null?fmt(c.meanRssi,1)+' dBm':'—'}`)
+          .addTo(heatLayer);
+        bounds.push([c.lat,c.lng]);
+      });
+      heatLayer.addTo(map);
+    } else {
+      // 'RSSI points' always colors by signal; 'markers' colors by session only when comparing
+      const byRssi = State.layerMode==='points' || !multi();
+      shown.forEach(s=>{
+        const pts=viewPoints(s);
+        const isActive=s.id===State.activeId;
+        const nm=escapeHtml(s.name);
+        pts.forEach(p=>{
+          const color = byRssi ? RL.rssiColor(p.rssi) : s.color;
+          const m=L.circleMarker([p.rxLat,p.rxLng],{radius:5,color:'#2a1f3a',weight:1,fillColor:color,fillOpacity:.9})
+            .bindPopup(`<b>${nm}</b><br>#${isFinite(p.pid)?p.pid:'?'} · ${distLabel(p.dist)}<br>RSSI ${isFinite(p.rssi)?p.rssi:'—'} dBm (${RL.rssiBucket(p.rssi)}) · SNR ${isFinite(p.snr)?p.snr:'—'} dB`+(isFinite(p.latencyMs)?`<br>Latency ${fmt(p.latencyMs,1)} ms`:''));
+          m.addTo(markersLayer);
+          if(isActive){ markersById[p._id]=m; m.on('click',()=>Highlight.set(p._id,true)); }
+          if(showLines){
+            L.polyline([[p.txLat,p.txLng],[p.rxLat,p.rxLng]],{color, weight:1, opacity:.5}).addTo(linesLayer);
+          }
+          bounds.push([p.rxLat,p.rxLng]);
+        });
+        const base=s.processed[0];   // fixed base = first logged TX coord, never moved by the filter
+        if(base){
+          L.circleMarker([base.txLat,base.txLng],{radius:8,color:'#e8e0f0',weight:2,fillColor:s.color,fillOpacity:1})
+            .bindPopup(`Base / reference · ${nm}`).addTo(markersLayer);
+          bounds.push([base.txLat,base.txLng]);
+        }
+      });
+      if(showLines) linesLayer.addTo(map);
+    }
+    Legend.render();
+    if(bounds.length){ map.fitBounds(bounds,{padding:[30,30]}); }
+    setTimeout(()=>map.invalidateSize(),60);
+  }
+  function highlight(id){
+    if(hl){ hl.setStyle({radius:5,weight:1}); hl=null; }
+    const m=markersById[id];
+    if(m){ m.setStyle({radius:9,weight:2}); m.bringToFront(); hl=m; }
+  }
+  function clearHL(){ if(hl){ hl.setStyle({radius:5,weight:1}); hl=null; } }
+  function invalidate(){ if(map) setTimeout(()=>map.invalidateSize(),60); }
+  return { render, highlight, clearHL, invalidate };
+})();
+
+/* =====================================================================
+ * Legend — adapts to the active layer mode and single/multi session
+ * ===================================================================== */
+const Legend = (() => {
+  function render(){
+    const el=$('legend');
+    if(State.layerMode==='heatmap'){
+      el.innerHTML='<span>circle = grid cell · color = mean RSSI (ramp below) · opacity ∝ packet count</span>'+ramp();
+    } else if(multi() && State.layerMode!=='points'){
+      el.innerHTML = shownSessions().map(s=>`<span><i style="background:${s.color}"></i>${escapeHtml(s.name)}</span>`).join('')
+        + '<span class="muted">— color by session; popup shows RSSI</span>';
+    } else {
+      el.innerHTML = ramp() + '<span><i style="background:#e8a840"></i>base / reference</span>';
+    }
+  }
+  function ramp(){
+    return [['#7a9e7e','strong (≥ −90)'],['#a094b8','good'],['#e8a840','fair'],
+            ['#c48030','weak'],['#c04040','near floor']]
+      .map(([c,t])=>`<span><i style="background:${c}"></i>${t}</span>`).join('');
+  }
+  return { render };
+})();
+
+/* =====================================================================
+ * Table — sortable, paginated packet list for the active session
+ * ===================================================================== */
+const Table = (() => {
+  const COLS = [
+    { key:'pid',       label:'PID',    get:p=>p.pid,       fmt:v=>isFinite(v)?v:'—' },
+    { key:'dist',      label:'Dist',   get:p=>p.dist,      fmt:distLabel },
+    { key:'brg',       label:'Bearing',get:p=>p.brg,       fmt:v=>isFinite(v)?fmt(v,1)+'°':'—' },
+    { key:'rssi',      label:'RSSI',   get:p=>p.rssi,      fmt:rssiCell, html:true },
+    { key:'snr',       label:'SNR',    get:p=>p.snr,       fmt:v=>isFinite(v)?fmt(v,1)+' dB':'—' },
+    { key:'latencyMs', label:'Latency',get:p=>p.latencyMs, fmt:v=>isFinite(v)?fmt(v,1)+' ms':'—' },
+    { key:'rxLat',     label:'RX lat', get:p=>p.rxLat,     fmt:v=>fmt(v,5) },
+    { key:'rxLng',     label:'RX lng', get:p=>p.rxLng,     fmt:v=>fmt(v,5) }
+  ];
+  let rows=[];   // current sorted+filtered set
+  function rssiCell(v){
+    if(!isFinite(v)) return '<span class="rssicell"><span class="dot" style="background:#6a6078"></span>—</span>';
+    return `<span class="rssicell"><span class="dot" style="background:${RL.rssiColor(v)}"></span>${v} dBm<span class="bk">${RL.rssiBucket(v)}</span></span>`;
+  }
+  function cmp(a,b,key){
+    let x=a[key], y=b[key];
+    const xf=isFinite(x), yf=isFinite(y);
+    if(!xf&&!yf) return 0; if(!xf) return 1; if(!yf) return -1;   // NaN sinks
+    return x<y?-1:x>y?1:0;
+  }
+  function head(){
+    const tr=document.createElement('tr');
+    COLS.forEach(c=>{
+      const th=document.createElement('th'); th.scope='col'; th.tabIndex=0;
+      const active=State.sort.key===c.key;
+      th.setAttribute('aria-sort', active ? (State.sort.dir>0?'ascending':'descending') : 'none');
+      th.innerHTML = c.label + (active?`<span class="arrow">${State.sort.dir>0?'▲':'▼'}</span>`:'');
+      const doSort=()=>{ if(State.sort.key===c.key) State.sort.dir*=-1; else State.sort={key:c.key,dir:1}; window.render(); };
+      th.onclick=doSort;
+      th.onkeydown=e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); doSort(); } };
+      tr.appendChild(th);
+    });
+    $('pktHead').innerHTML=''; $('pktHead').appendChild(tr);
+  }
+  function render(fp){
+    rows = fp.slice().sort((a,b)=>State.sort.dir*cmp(a,b,State.sort.key));
+    head();
+    const ps = State.pageSize;
+    const total = rows.length;
+    const pages = ps>0 ? Math.max(1,Math.ceil(total/ps)) : 1;
+    if(State.page>=pages) State.page=pages-1;
+    if(State.page<0) State.page=0;
+    const start = ps>0 ? State.page*ps : 0;
+    const end = ps>0 ? Math.min(total,start+ps) : total;
+    const body=$('pktBody'); body.innerHTML='';
+    for(let i=start;i<end;i++){
+      const p=rows[i];
+      const tr=document.createElement('tr'); tr.dataset.id=p._id; tr.tabIndex=0;
+      tr.innerHTML = COLS.map(c=>{ const v=c.get(p); return `<td>${c.html?c.fmt(v):escapeHtml(c.fmt(v))}</td>`; }).join('');
+      tr.onmouseenter=()=>Highlight.set(p._id,false);
+      tr.onmouseleave=()=>Highlight.clear();
+      tr.onfocus=()=>Highlight.set(p._id,false);
+      tr.onclick=()=>Highlight.set(p._id,true);
+      tr.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); Highlight.set(p._id,true); } };
+      body.appendChild(tr);
+    }
+    $('tableStatus').textContent = total ? `Showing ${total?start+1:0}–${end} of ${total} packets` : 'No packets in filter';
+    $('pageInfo').textContent = `Page ${State.page+1} / ${pages}`;
+    $('prevPage').disabled = State.page<=0;
+    $('nextPage').disabled = State.page>=pages-1;
+  }
+  function gotoId(id){
+    const idx=rows.findIndex(p=>p._id===id);
+    if(idx<0) return false;
+    if(State.pageSize>0){ const target=Math.floor(idx/State.pageSize); if(target!==State.page){ State.page=target; render(filteredPoints()); } }
+    return true;
+  }
+  function highlightRow(id,scroll){
+    document.querySelectorAll('#pktBody tr.hl').forEach(tr=>tr.classList.remove('hl'));
+    if(id==null) return;
+    let tr=$('pktBody').querySelector(`tr[data-id="${id}"]`);
+    if(!tr && scroll){ if(gotoId(id)) tr=$('pktBody').querySelector(`tr[data-id="${id}"]`); }
+    if(tr){ tr.classList.add('hl'); if(scroll) tr.scrollIntoView({block:'nearest',behavior:'smooth'}); }
+  }
+  return { render, highlightRow, gotoId };
+})();
+
+function escapeHtml(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+/* =====================================================================
+ * Highlight — links table <-> map <-> charts by packet id
+ * ===================================================================== */
+const Highlight = (() => {
+  function set(id, scroll){ Table.highlightRow(id,scroll); MapView.highlight(id); Charts.highlight(id); }
+  function clear(){ Table.highlightRow(null,false); MapView.clearHL(); Charts.clear(); }
+  return { set, clear };
+})();
+
+/* =====================================================================
+ * Compare — side-by-side stats table for all loaded sessions
+ * ===================================================================== */
+const Compare = (() => {
+  const LABEL = { count:'Packets', maxDist:'Max range', meanDist:'Mean range',
+    bestRssi:'Best RSSI', worstRssi:'Worst RSSI (floor)', pdr:'Delivery ratio',
+    meanLatency:'Mean latency', maxLatency:'Max latency' };
+  function valFmt(key,v){
+    if(v==null) return '—';
+    if(key==='count') return v;
+    if(key==='maxDist'||key==='meanDist') return distLabel(v);
+    if(key==='bestRssi'||key==='worstRssi') return fmt(v,0)+' dBm';
+    if(key==='pdr') return fmt(v,1)+' %';
+    return fmt(v,1)+' ms';
+  }
+  function render(){
+    const panel=$('comparePanel');
+    if(State.sessions.length<2){ panel.style.display='none'; return; }
+    panel.style.display='block';
+    const c=RL.compareSessions(State.sessions.map(s=>({name:s.name, summary:RL.summarize(s.processed)})));
+    let html='<div class="cmp"><table><thead><tr><th>Metric</th>'+
+      c.names.map((n,i)=>`<th><span class="rssicell"><span class="dot" style="background:${State.sessions[i].color}"></span>${escapeHtml(n)}</span></th>`).join('')+
+      '</tr></thead><tbody>';
+    c.metrics.forEach(m=>{
+      html+='<tr><td>'+LABEL[m.key]+'</td>'+
+        m.values.map((v,i)=>{
+          const cls=i===m.bestIdx?'best':(i===m.worstIdx?'worst':'');
+          const mark=i===m.bestIdx?'<span class="mark">▲</span>':'';
+          return `<td class="val ${cls}">${valFmt(m.key,v)}${mark}</td>`;
+        }).join('')+'</tr>';
+    });
+    html+='</tbody></table></div>';
+    $('compareTable').innerHTML=html;
+  }
+  function markdown(){
+    const c=RL.compareSessions(State.sessions.map(s=>({name:s.name, summary:RL.summarize(s.processed)})));
+    let md='### Session comparison (full sessions, ignores filter)\n\n| Metric | '+c.names.join(' | ')+' |\n| --- |'+c.names.map(()=>' --- |').join('')+'\n';
+    c.metrics.forEach(m=>{ md+='| '+LABEL[m.key]+' | '+m.values.map((v,i)=>valFmt(m.key,v)+(i===m.bestIdx?' ▲':'')).join(' | ')+' |\n'; });
+    return md;
+  }
+  return { render, markdown };
+})();
+
+/* =====================================================================
+ * Export — chart PNG, copy-summary Markdown, filtered CSV
+ * ===================================================================== */
+const Export = (() => {
+  function copyText(text){
+    const done=()=>announce('Summary copied to clipboard.');
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(done).catch(()=>fallback(text,done));
+    } else fallback(text,done);
+  }
+  function fallback(text,done){
+    const ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select();
+    try{ document.execCommand('copy'); done(); }catch(e){ alert('Copy failed — select manually:\n\n'+text); }
+    document.body.removeChild(ta);
+  }
+  function copyMarkdown(){
+    const s=activeSession();
+    let md = RL.summaryToMarkdown(RL.summarize(filteredPoints()), s ? s.name+' (filtered)' : 'Summary');
+    if(State.sessions.length>=2) md += '\n'+Compare.markdown();
+    copyText(md);
+  }
+  function downloadCSV(){
+    const pts=filteredPoints();
+    const head='pid,rx_lat,rx_lng,tx_lat,tx_lng,distance_m,bearing_deg,rssi_dbm,snr_db,latency_ms\n';
+    const cell=v=>isFinite(v)?v:'';   // blank, not the literal "NaN", for missing numerics
+    const body=pts.map(p=>[cell(p.pid),p.rxLat,p.rxLng,p.txLat,p.txLng,fmt(p.dist,1),fmt(p.brg,1),cell(p.rssi),cell(p.snr),isFinite(p.latencyMs)?fmt(p.latencyMs,1):''].join(',')).join('\n');
+    const blob=new Blob([head+body],{type:'text/csv'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+    const s=activeSession();
+    a.download=(s?s.name.replace(/\.csv$/i,''):'range')+'_processed.csv'; a.click();
+  }
+  return { copyMarkdown, downloadCSV };
+})();
+
+/* =====================================================================
+ * Tabs — ARIA tablist, roving tabindex, hash routing + deep links
+ * ===================================================================== */
+const Tabs = (() => {
+  const TABS=['analyze','calc','reference'];
+  const LEGACY={ logproc:'analyze', how:'reference', packet:'reference', procedure:'reference',
+    'calc-link':'calc','calc-fresnel':'calc','calc-toa':'calc','calc-dist':'calc',
+    analyze:'analyze', calculators:'calc', calc:'calc', reference:'reference' };
+  function select(tab, focus){
+    TABS.forEach(t=>{
+      const btn=$('tab-'+t+'-btn'), panel=$('tab-'+t);
+      const on=t===tab;
+      btn.setAttribute('aria-selected', on?'true':'false');
+      btn.tabIndex = on?0:-1;
+      panel.hidden = !on;
+    });
+    if(focus) $('tab-'+tab+'-btn').focus();
+    if(tab==='analyze') MapView.invalidate();
+  }
+  function fromHash(){
+    const raw=(location.hash||'').replace('#','');
+    const tab=LEGACY[raw]||'analyze';
+    select(tab,false);
+    if(raw && raw!==tab){ requestAnimationFrame(()=>{ const t=$(raw); if(t) t.scrollIntoView({behavior:'smooth',block:'start'}); }); }
+  }
+  function init(){
+    TABS.forEach(t=>{
+      $('tab-'+t+'-btn').addEventListener('click',()=>{ history.replaceState(null,'','#'+t); select(t,false); });
+    });
+    const list=document.querySelector('[role=tablist]');
+    list.addEventListener('keydown',e=>{
+      const i=TABS.indexOf(document.activeElement.id.replace('tab-','').replace('-btn',''));
+      if(i<0) return;
+      let j=i;
+      if(e.key==='ArrowRight'||e.key==='ArrowDown') j=(i+1)%TABS.length;
+      else if(e.key==='ArrowLeft'||e.key==='ArrowUp') j=(i-1+TABS.length)%TABS.length;
+      else if(e.key==='Home') j=0;
+      else if(e.key==='End') j=TABS.length-1;
+      else return;
+      e.preventDefault(); select(TABS[j],true); history.replaceState(null,'','#'+TABS[j]);
+    });
+    window.addEventListener('hashchange',fromHash);
+    fromHash();
+  }
+  return { init };
+})();
+
+/* =====================================================================
+ * Ingest — file read + session creation (multi-file, single-GPS fallback)
+ * ===================================================================== */
+const Ingest = (() => {
+  let pending=[];   // queue of {idx,rows,name} single-GPS files awaiting a reference point
+  function loadText(text,name){
+    const {idx,rows}=RL.parseCSV(text);
+    if(RL.hasTxColumns(idx)){
+      const processed=RL.processRows(idx,rows,null);
+      if(!processed.length){ alert('No usable rows in '+name+' (need RX + TX coordinates).'); return; }
+      addSession(name,processed);   // does not disturb a pending single-GPS file
+    } else {
+      pending.push({idx,rows,name});
+      $('refbox').style.display='block';
+      announce('Single-GPS log "'+name+'" — enter a reference point.');
+    }
+  }
+  function readFiles(files){
+    [...files].forEach(f=>{ const r=new FileReader(); r.onload=()=>loadText(r.result,f.name); r.readAsText(f); });
+  }
+  function applyRef(){
+    if(!pending.length) return;
+    const lat=num('ref_lat'), lng=num('ref_lng');
+    if(!isFinite(lat)||!isFinite(lng)){ alert('Enter valid reference lat/lng'); return; }
+    const job=pending.shift();
+    const processed=RL.processRows(job.idx,job.rows,{lat,lng});
+    if(!processed.length) alert('No usable rows after applying reference for '+job.name+'.');
+    else addSession(job.name,processed);
+    if(pending.length) announce(pending.length+' more single-GPS file(s) need a reference point.');
+    else $('refbox').style.display='none';
+  }
+  function clearPending(){ pending=[]; }
+  return { readFiles, applyRef, clearPending };
+})();
+
+/* =====================================================================
+ * render — the single update path; reads State, refreshes every view
+ * ===================================================================== */
+window.render = function render(){
+  const has = State.sessions.length>0;
+  $('results').style.display = has ? 'block' : 'none';
+  Chips.render();
+  Compare.render();
+  if(!has) return;
+  const fp = filteredPoints();
+  Stats.render(fp);
+  Charts.render();
+  MapView.render();
+  Table.render(fp);
+  Filters.sync();
+};
+
+/* =====================================================================
+ * wiring
+ * ===================================================================== */
+(function init(){
+  Calc.init();
+  Tabs.init();
+
+  const drop=$('drop'), fileEl=$('file');
+  drop.onclick=()=>fileEl.click();
+  drop.onkeydown=e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); fileEl.click(); } };
+  drop.ondragover=e=>{ e.preventDefault(); drop.classList.add('drag'); };
+  drop.ondragleave=()=>drop.classList.remove('drag');
+  drop.ondrop=e=>{ e.preventDefault(); drop.classList.remove('drag'); Ingest.readFiles(e.dataTransfer.files); };
+  fileEl.onchange=e=>{ Ingest.readFiles(e.target.files); e.target.value=''; };
+
+  $('ref_apply').onclick=Ingest.applyRef;
+  $('filtReset').onclick=Filters.reset;
+  $('copyMd').onclick=Export.copyMarkdown;
+  $('dl').onclick=Export.downloadCSV;
+  $('reset').onclick=()=>{
+    State.sessions=[]; State.activeId=null; State.page=0; State.sort={key:'pid',dir:1};
+    ['dist','rssi','snr','pid'].forEach(k=>{ State.filter[k]=null; State.bounds[k]=null; });
+    $('filterbar').innerHTML=''; $('refbox').style.display='none'; Ingest.clearPending();
+    render(); announce('All sessions cleared.');
+  };
+
+  $('pageSize').onchange=e=>{ State.pageSize=parseInt(e.target.value,10); State.page=0; render(); };
+  $('prevPage').onclick=()=>{ State.page--; render(); };
+  $('nextPage').onclick=()=>{ State.page++; render(); };
+
+  document.querySelectorAll('input[name=layer]').forEach(r=>r.onchange=()=>{ State.layerMode=r.value; render(); });
+  $('togglelines').onchange=()=>render();
+  document.querySelectorAll('[data-png]').forEach(b=>b.onclick=()=>Charts.png(b.dataset.png));
+})();
+</script>
+</body>
+</html>

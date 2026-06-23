@@ -362,3 +362,188 @@ test('fixture: all preset CSVs have consistent dual-GPS header', () => {
     assert.ok('packet_id' in idx, `${name} must have packet_id`);
   }
 });
+
+/* ============================ filterPoints / valueRange ============================ */
+// inline points: {dist, rssi, snr, pid, latencyMs}
+const PTS = [
+  { dist: 100,  rssi: -80,  snr: 8,  pid: 1, latencyMs: 10 },
+  { dist: 500,  rssi: -95,  snr: 4,  pid: 2, latencyMs: 20 },
+  { dist: 1500, rssi: -110, snr: -2, pid: 3, latencyMs: 30 },
+  { dist: 3000, rssi: NaN,  snr: 1,  pid: 4, latencyMs: NaN },
+];
+
+test('filterPoints: empty/no ranges returns every point', () => {
+  assert.equal(RL.filterPoints(PTS, {}).length, 4);
+  assert.equal(RL.filterPoints(PTS, { dist: null, rssi: null }).length, 4);
+});
+
+test('filterPoints: distance window keeps only near rows', () => {
+  const out = RL.filterPoints(PTS, { dist: [0, 1000] });
+  assert.deepEqual(out.map(p => p.pid), [1, 2]);
+});
+
+test('filterPoints: rssi window drops out-of-range AND NaN-rssi rows', () => {
+  const out = RL.filterPoints(PTS, { rssi: [-100, -70] });
+  assert.deepEqual(out.map(p => p.pid), [1, 2]);   // -110 out, NaN dropped
+});
+
+test('filterPoints: a NaN field survives when that field is NOT constrained', () => {
+  const out = RL.filterPoints(PTS, { dist: [0, 5000] });   // rssi unconstrained
+  assert.deepEqual(out.map(p => p.pid), [1, 2, 3, 4]);     // NaN-rssi pid 4 kept
+});
+
+test('filterPoints: combined ranges intersect (AND) and never mutate input', () => {
+  const snapshot = JSON.stringify(PTS);
+  const out = RL.filterPoints(PTS, { dist: [0, 2000], pid: [2, 9] });
+  assert.deepEqual(out.map(p => p.pid), [2, 3]);
+  assert.equal(JSON.stringify(PTS), snapshot, 'input array untouched');
+});
+
+test('valueRange: min/max over finite values, ignores NaN', () => {
+  assert.deepEqual(RL.valueRange(PTS, 'dist'), { min: 100, max: 3000 });
+  assert.deepEqual(RL.valueRange(PTS, 'rssi'), { min: -110, max: -80 });
+});
+
+test('valueRange: all-NaN field returns null; single point min===max', () => {
+  assert.equal(RL.valueRange([{ rssi: NaN }, { rssi: NaN }], 'rssi'), null);
+  assert.deepEqual(RL.valueRange([{ dist: 42 }], 'dist'), { min: 42, max: 42 });
+});
+
+/* ============================ histogram ============================ */
+test('histogram: 10 values into 5 bins → 2 per bin', () => {
+  const h = RL.histogram([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], { bins: 5 });
+  assert.equal(h.length, 5);
+  assert.deepEqual(h.map(b => b.count), [2, 2, 2, 2, 2]);
+});
+
+test('histogram: edge values land in expected bins, max in last bin', () => {
+  const h = RL.histogram([0, 5, 10], { min: 0, max: 10, bins: 2 });
+  assert.equal(h[0].count, 1);   // 0 -> bin 0
+  assert.equal(h[1].count, 2);   // 5 -> bin 1, 10 -> clamped to last bin
+});
+
+test('histogram: empty / all-NaN input returns []', () => {
+  assert.deepEqual(RL.histogram([]), []);
+  assert.deepEqual(RL.histogram([NaN, NaN]), []);
+});
+
+test('histogram: bins=1 returns a single bucket with all values', () => {
+  const h = RL.histogram([1, 2, 3, 4], { bins: 1 });
+  assert.equal(h.length, 1);
+  assert.equal(h[0].count, 4);
+});
+
+test('histogram: NaN min/max falls back to data extent (no crash)', () => {
+  const h = RL.histogram([1, 2, 3], { min: NaN, bins: 3 });
+  assert.equal(h.length, 3);
+  assert.equal(h.reduce((a, b) => a + b.count, 0), 3, 'all values counted');
+});
+
+test('histogram: an inverted [max<min] window is tolerated by swapping', () => {
+  const h = RL.histogram([1, 2, 3, 4], { min: 10, max: 0, bins: 2 });
+  assert.equal(h.reduce((a, b) => a + b.count, 0), 4);
+});
+
+/* ============================ gridBins ============================ */
+const GEO = [
+  { rxLat: 33.42550, rxLng: -111.94000, rssi: -90, snr: 5 },   // cluster A
+  { rxLat: 33.42550, rxLng: -111.94000, rssi: -100, snr: 3 },  // cluster A (same cell)
+  { rxLat: 33.45000, rxLng: -111.94000, rssi: NaN, snr: NaN }, // far cell, all-NaN
+];
+
+test('gridBins: clustered + far points produce ≥2 non-empty cells', () => {
+  const cells = RL.gridBins(GEO, { cellMeters: 100 });
+  assert.ok(cells.length >= 2, `expected >=2 cells, got ${cells.length}`);
+  const total = cells.reduce((a, c) => a + c.count, 0);
+  assert.equal(total, 3);
+});
+
+test('gridBins: meanRssi is the arithmetic mean of finite RSSI in a cell', () => {
+  const cells = RL.gridBins(GEO, { cellMeters: 100 });
+  const busy = cells.find(c => c.count === 2);
+  assert.ok(busy, 'a 2-point cell exists');
+  near(busy.meanRssi, -95, 1e-9, 'mean of -90,-100');
+});
+
+test('gridBins: a cell with only NaN RSSI reports meanRssi null', () => {
+  const cells = RL.gridBins(GEO, { cellMeters: 100 });
+  const lone = cells.find(c => c.count === 1);
+  assert.ok(lone, 'the far cell exists');
+  assert.equal(lone.meanRssi, null);
+});
+
+test('gridBins: deterministic for a fixed input; empty in → empty out', () => {
+  assert.deepEqual(RL.gridBins(GEO, { cellMeters: 100 }), RL.gridBins(GEO, { cellMeters: 100 }));
+  assert.deepEqual(RL.gridBins([], { cellMeters: 100 }), []);
+});
+
+/* ============================ compareSessions ============================ */
+test('compareSessions: direction-aware best/worst flags across 2 sessions', () => {
+  const A = { count: 50, maxDist: 1000, meanDist: 400, bestRssi: -80, worstRssi: -110,
+              pdr: 90, meanLatency: 50, maxLatency: 80 };
+  const B = { count: 60, maxDist: 2000, meanDist: 500, bestRssi: -70, worstRssi: -120,
+              pdr: 80, meanLatency: 40, maxLatency: 70 };
+  const c = RL.compareSessions([{ name: 'A', summary: A }, { name: 'B', summary: B }]);
+  const get = k => c.metrics.find(m => m.key === k);
+  assert.deepEqual(c.names, ['A', 'B']);
+  assert.equal(get('maxDist').bestIdx, 1, 'B has the longer max range');
+  assert.equal(get('pdr').bestIdx, 0, 'A has the higher PDR');
+  assert.equal(get('bestRssi').bestIdx, 1, 'best RSSI = least negative (B -70)');
+  assert.equal(get('worstRssi').bestIdx, 0, 'better floor = higher RSSI (A -110)');
+  assert.equal(get('meanLatency').bestIdx, 1, 'lower latency is better (B 40)');
+});
+
+test('compareSessions: single session yields no comparative flags', () => {
+  const c = RL.compareSessions([{ name: 'solo', summary: { maxDist: 1000, pdr: 95 } }]);
+  c.metrics.forEach(m => { assert.equal(m.bestIdx, -1); assert.equal(m.worstIdx, -1); });
+});
+
+test('compareSessions: a null/absent metric is never flagged best/worst', () => {
+  const A = { maxDist: 1000, pdr: null };
+  const B = { maxDist: 2000, pdr: 80 };
+  const c = RL.compareSessions([{ name: 'A', summary: A }, { name: 'B', summary: B }]);
+  const pdr = c.metrics.find(m => m.key === 'pdr');
+  assert.equal(pdr.bestIdx, -1, 'only one finite PDR → no winner');
+  assert.equal(pdr.values[0], null);
+});
+
+/* ============================ pathLossFit ============================ */
+test('pathLossFit: recovers a known exponent from log-linear data (r²≈1)', () => {
+  // RSSI = -30 - 10*n*log10(d), n = 3
+  const pts = [1, 10, 100, 1000].map(d => ({ dist: d, rssi: -30 - 30 * Math.log10(d) }));
+  const fit = RL.pathLossFit(pts);
+  assert.ok(fit !== null);
+  near(fit.n, 3, 1e-6, 'path-loss exponent');
+  near(fit.r2, 1, 1e-9, 'perfect fit');
+  near(fit.intercept, -30, 1e-6, 'intercept');
+});
+
+test('pathLossFit: <2 usable points → null; ignores zero/neg distance & NaN rssi', () => {
+  assert.equal(RL.pathLossFit([{ dist: 100, rssi: -90 }]), null);
+  assert.equal(RL.pathLossFit([{ dist: 0, rssi: -90 }, { dist: -5, rssi: -95 },
+                               { dist: 100, rssi: NaN }]), null);
+});
+
+/* ============================ summaryToMarkdown ============================ */
+test('summaryToMarkdown: emits a titled table with metric rows', () => {
+  const md = RL.summaryToMarkdown({ count: 3, maxDist: 1500, meanDist: 600,
+    bestRssi: -80, worstRssi: -110, pdr: 75, meanLatency: 20, maxLatency: 30 }, 'Run 1');
+  assert.match(md, /### Run 1/);
+  assert.match(md, /\| Metric \| Value \|/);
+  assert.match(md, /\| Packets \| 3 \|/);
+  assert.match(md, /\| Max range \| 1.50 km \|/);
+  assert.match(md, /\| Delivery ratio \| 75.0 % \|/);
+});
+
+test('summaryToMarkdown: null summary is handled gracefully', () => {
+  const md = RL.summaryToMarkdown(null, 'Empty');
+  assert.match(md, /### Empty/);
+  assert.match(md, /No data/);
+});
+
+test('rssiBucket: qualitative label tracks the colour ramp', () => {
+  assert.equal(RL.rssiBucket(-80), 'strong');
+  assert.equal(RL.rssiBucket(-110), 'fair');
+  assert.equal(RL.rssiBucket(-130), 'floor');
+  assert.equal(RL.rssiBucket(NaN), 'n/a');
+});
