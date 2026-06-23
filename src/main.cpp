@@ -1,5 +1,9 @@
 // SDCARD_SS_PIN is defined for the built-in SD on some boards.
 #include "TypeDef.h"
+#include "projdefs.h"
+#include "rtos.h"
+#include "wiring_constants.h"
+#include "wiring_digital.h"
 #include <Arduino.h>
 #include <SPI.h>
 #include <TinyGPSPlus.h>
@@ -39,6 +43,10 @@ typedef FsFile file_t;
 #define NODE_ID 1
 #endif
 
+#ifndef TARGET_ID
+#define TARGET_ID 2
+#endif
+
 // lora pre processor defs
 // TODO: replace all pinouts with actuals
 #ifndef SX126X_CS
@@ -63,11 +71,17 @@ constexpr uint8_t RX_GPS_PIN = 22;
 constexpr uint8_t TX_GPS_PIN = 20;
 constexpr uint8_t PPS_GPS_PIN = 31;
 //constexpr uint8_t SD_CS_PIN = 24;
+constexpr uint8_t BUTTON_PIN = PIN_100;
 
 constexpr uint16_t LOG_BUFFER_LEN = 512; // in bytes
-const char* logFileHeader = "event_time_us,time_valid,utc_iso,event_type,node_id,packet_id,lat_e7,lng_e7,gps_fix_time_us,rssi_dbm,snr_db\n"; // file header
+//const char* logFileHeader = "event_time_us,time_valid,utc_iso,event_type,node_id,packet_id,lat_e7,lng_e7,gps_fix_time_us,rssi_dbm,snr_db\n"; // file header
+const char* logFileHeader = "tx_unix_seconds,tx_usec,rx_unix_seconds,rx_usec,time_valid,utc_iso,event_type,node_id,packet_id,lat_e7,lng_e7,rx_rssi_dbm,rx_snr_db\n"; // file header
 char logBuffer[LOG_BUFFER_LEN];
 size_t logIndex = 0;
+volatile bool radioInTx = false;
+
+static QueueHandle_t txReqQueue;
+constexpr uint8_t txReqQueueLen = 4;
 
 TinyGPSPlus gps;
 
@@ -86,10 +100,10 @@ struct LogEvent {
     uint8_t eventType;
     uint8_t nodeId;
     uint32_t packetId;
+    uint8_t gpsValid;
     int32_t latE7;
     int32_t lonE7;
     uint64_t gpsFixTimeUs;
-    uint8_t gpsValid;
     uint16_t gpsAgeMs;
     int16_t rssiDbm;
     int8_t snrDb;
@@ -110,9 +124,7 @@ char logName[13];
 volatile bool loraRxFlag = false;
 enum RadioIrqType : uint8_t {
     RADIO_IRQ_RX_DONE = 1,
-    RADIO_IRQ_TX_DONE = 2,
-    RADIO_IRQ_RX_TIMEOUT = 3,
-    RADIO_IRQ_CAD_DONE = 4
+    RADIO_IRQ_TX_DONE = 2
 };
 struct RadioIrqEvent {
 	RadioIrqType type;
@@ -137,6 +149,8 @@ bool flushLogBuffer(bool);
 bool appendToLogBuffer(const char*, size_t);
 // isrs
 void onRadioDio1(void);
+void handleRxDone(uint32_t);
+void pollTx(void*);
 
 
 void txTelemetry(void* parameter){
@@ -204,7 +218,7 @@ void gpsPoll(void* parameter){
 	while(1){
 		while(Serial1.available()){              // drain UART each cycle, no per-byte delay
 			if(gps.encode(Serial1.read())){
-				Serial.println("new fix");
+				//Serial.println("new fix");
 				GpsFix fix;
 				fix.lat_E7 = (int32_t)(gps.location.lat() * 10000000.0);
 				fix.lng_E7 = (int32_t)(gps.location.lng() * 10000000.0);
@@ -292,40 +306,78 @@ bool appendToLogBuffer(const char* data, size_t len){
 
 void onRadioDio1(void){
 	RadioIrqEvent ev;
-	ev.type = RADIO_IRQ_RX_DONE;
-	ev.microsAtIrq = micros();
+	if(radioInTx){ev.type = RADIO_IRQ_TX_DONE;} // if in tx (startTransmit), cannot receive
+	else{ev.type = RADIO_IRQ_RX_DONE;}
+	ev.microsAtIrq = millis();
 
-	BaseType_t woken = pdFALSE;
+	BaseType_t woken = pdFALSE; // deterministically fastest way to handle smallest
     xQueueSendFromISR(radioIrqQueue, &ev, &woken);
     portYIELD_FROM_ISR(woken);
 }
 
 void lora_handleRx(void* parameter){
     RadioIrqEvent irq;
+    uint8_t txReq;
 	while (true) {
-		if (xQueueReceive(radioIrqQueue, &irq, portMAX_DELAY) == pdTRUE) {
+		// wait on radio IRQ with short timeout so we also poll txReqQueue
+		if(xQueueReceive(radioIrqQueue, &irq, pdMS_TO_TICKS(20)) == pdTRUE){
 			switch (irq.type) {
 				case RADIO_IRQ_RX_DONE:
 					handleRxDone(irq.microsAtIrq);
 					break;
 
 				case RADIO_IRQ_TX_DONE:
-					handleTxDone(irq.microsAtIrq);
+					radioInTx = false;
+					radio.startReceive();
 					break;
 
-				case RADIO_IRQ_RX_TIMEOUT:
-					handleTimeout(irq.microsAtIrq);
+				default:
 					break;
-
-				//case RADIO_IRQ_CRC_ERR:
-				//	handleCrcError(irq.microsAtIrq);
-				//	break;
+			}
+		}
+		// drain any pending button-press requests
+		while(xQueueReceive(txReqQueue, &txReq, 0) == pdTRUE){
+			if(radioInTx){
+				Serial.println("[TX] busy (radioInTx), dropping button req");
+				continue;
+			}
+			AckPacket ackPacket;
+			sftrk_make_req_log(&ackPacket, NODE_ID, TARGET_ID);
+			radioInTx = true;
+			int16_t s = radio.startTransmit((const uint8_t*)&ackPacket, sizeof(struct AckPacket));
+			if(s != RADIOLIB_ERR_NONE){
+				radioInTx = false;
+				radio.startReceive();
+				Serial.printf("[TX] startTransmit FAIL state=%d\n", s);
+			} else {
+				Serial.println("[TX] 0x30 sent, awaiting TX_DONE");
 			}
 		}
 	}
 }
 
 void handle_location(const struct LocationPacket* loc, bool valid){
+    //uint64_t eventTimeUs = gpsTimeFromMicros(irqMicros);
+    LogEvent log = {};
+
+
+	if(valid) log.eventType = SFTRK_FLAG_GPS_VALID;
+	else log.eventType = SFTRK_FLAG_GPS_INVALID;
+
+    //log.eventTimeUs = eventTimeUs;
+	log.eventTimeUs = millis();
+    //log.timeValid = eventTimeUs != 0;
+    log.eventType = SFTRK_FLAG_GPS_VALID;
+    log.rssiDbm = loc->rx_rssi;
+	log.snrDb = loc->rx_snr;
+    //log.snrDb = (int8_t)round(snrFloat * 10);
+    //log.packetLen = ;
+	
+
+    //copyLatestGpsFix(&log.gps);
+	Serial.printf("%d,%d",latestFix.lat_E7, latestFix.lng_E7);
+
+    xQueueSend(logQueue, &log, 0);
 	return;
 }
 
@@ -334,8 +386,6 @@ void handle_ack(const struct AckPacket* ack){
 }
 
 void handleRxDone(uint32_t irqMicros) {
-    uint64_t eventTimeUs = gpsTimeFromMicros(irqMicros);
-
     // Read packet and metadata outside ISR
 	size_t rxLen = radio.getPacketLength();
     int16_t rssi = radio.getRSSI();
@@ -348,7 +398,7 @@ void handleRxDone(uint32_t irqMicros) {
 	}
 
 	if(state != RADIOLIB_ERR_NONE){
-		
+		rejectedCrc++;
 	}
 
 	// possibilities:
@@ -379,25 +429,48 @@ void handleRxDone(uint32_t irqMicros) {
 			break;
 	}
 
-	// TODO: implement this in separated funcs for loc and/or ack
     LogEvent log = {};
-    log.eventTimeUs = eventTimeUs;
-    log.timeValid = eventTimeUs != 0;
+    log.eventTimeUs = irqMicros;
+    //log.timeValid = eventTimeUs != 0;
+	log.timeValid = true;
     log.eventType = SFTRK_FLAG_GPS_VALID;
     log.rssiDbm = rssi;
     log.snrDb = (int8_t)round(snrFloat * 10);
     log.packetLen = rxLen;
 
-    copyLatestGpsFix(&log.gps);
+    //copyLatestGpsFix(&log.);
 
-    xQueueSend(logQueue, &log, 0);
+    xQueueSend(logQueue, &log, pdMS_TO_TICKS(50));
 
     // restart receive if needed
     radio.startReceive();
 }
 
+void pollTx(void* parameter){
+	uint8_t stable = 0;
+	bool debounced = HIGH;
+	while(1){
+		bool raw = digitalRead(BUTTON_PIN);
+		if(raw == debounced){
+			stable = 0;
+		} else {
+			if(++stable >= 3){
+				debounced = raw;
+				stable = 0;
+				if(debounced == LOW){
+					uint8_t dummy = 0;
+					xQueueSend(txReqQueue, &dummy, 0);
+					Serial.println("button pressed");
+				}
+			}
+		}
+		vTaskDelay(pdMS_TO_TICKS(20));
+	}
+}
+
 void setup(void){
 	pinMode(LED_BUILTIN, OUTPUT);
+	pinMode(BUTTON_PIN, INPUT_PULLUP);
 	digitalWrite(LED_BUILTIN, LOW);
 	Serial.begin(115200);
 	while(!Serial){
@@ -419,14 +492,19 @@ void setup(void){
 
 	logQueue = xQueueCreate(logQueueLen, sizeof(LogEvent));
 	radioIrqQueue = xQueueCreate(radioIrqQueueLen, sizeof(RadioIrqEvent));
+	txReqQueue = xQueueCreate(txReqQueueLen, sizeof(uint8_t));
 
 	Serial.println("queues init");
 
 	int radio_status = radio.begin();
+	if(radio_status != RADIOLIB_ERR_NONE){
+		while(1){delay(1);}
+	}
 	radio.setSyncWord(0x5F);
 	radio.setPreambleLength(8);
 	radio.setCRC(2);
 	radio.explicitHeader();
+	radio.setDio1Action(onRadioDio1);
 
 
 	//if(radio_status == RADIOLIB_)
@@ -474,13 +552,14 @@ void setup(void){
 			"Blink LED",
 			1024,
 			NULL,
-			2,
+			1,
 			NULL);
 	Serial.println("led init");
 
-
+	xTaskCreate(pollTx, "Poll for Tx", 1024, NULL, 2, NULL);
 }
 
 void loop(void){
+	//vTaskDelay(pdMS_TO_TICKS(100));
 	vTaskDelay(pdMS_TO_TICKS(100));
 }
