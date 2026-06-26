@@ -68,6 +68,11 @@ static inline void sftrk_make_req_log(struct AckPacket* ackPacket, uint16_t node
 static inline void sftrk_make_location(struct LocationPacket* loc, uint16_t node, uint16_t target, bool gpsFix, int16_t rssi, int16_t snr, int32_t lng, int32_t lat, uint8_t numSat, uint8_t avgSnr, uint16_t packet_id){
 	loc->rx_rssi = rssi;
 	loc->rx_snr = snr;
+	loc->gps_lng = lng;
+	loc->gps_lat = lat;
+	loc->gps_numSat = numSat;
+	loc->gps_avgGsvSnr = avgSnr;
+	loc->packet_id = packet_id;
 	if(gpsFix){ // i hate ternary operators
 		sftrk_init_header(&loc->header, SFTRK_FLAG_GPS_VALID, node, target);
 	}else{

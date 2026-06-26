@@ -1,12 +1,9 @@
 // SDCARD_SS_PIN is defined for the built-in SD on some boards.
-#include "TypeDef.h"
-#include "projdefs.h"
-#include "rtos.h"
-#include "wiring_constants.h"
-#include "wiring_digital.h"
 #include <Arduino.h>
 #include <SPI.h>
 #include <TinyGPSPlus.h>
+#include <cstring>
+#include <inttypes.h>
 
 #define SD_FAT_TYPE 3
 #include <SdFat.h>
@@ -16,7 +13,8 @@
 
 
 // Try max SPI clock for an SD. Reduce SPI_CLOCK if errors occur.
-#define SPI_CLOCK 400000UL   // 400 kHz raw Hz; this fork has no SD_SCK_KHZ
+//#define SPI_CLOCK 400000UL   // 400 kHz raw Hz; this fork has no SD_SCK_KHZ
+#define SPI_CLOCK SD_SCK_MHZ(50)
 
 #define SD_FAT_TYPE 3
 #if SD_FAT_TYPE == 0
@@ -39,6 +37,8 @@ typedef FsFile file_t;
 
 #define SD_CONFIG SdSpiConfig(SD_CS_PIN, SHARED_SPI, SPI_CLOCK) // hardware SPI shared w sx1262 (radio slept)
 																//
+#define SD_SYNC_PERIOD_MS 5000 // force buffer flush every period
+
 #ifndef NODE_ID
 #define NODE_ID 1
 #endif
@@ -75,10 +75,12 @@ constexpr uint8_t BUTTON_PIN = PIN_100;
 
 constexpr uint16_t LOG_BUFFER_LEN = 512; // in bytes
 //const char* logFileHeader = "event_time_us,time_valid,utc_iso,event_type,node_id,packet_id,lat_e7,lng_e7,gps_fix_time_us,rssi_dbm,snr_db\n"; // file header
-const char* logFileHeader = "tx_unix_seconds,tx_usec,rx_unix_seconds,rx_usec,time_valid,utc_iso,event_type,node_id,packet_id,lat_e7,lng_e7,rx_rssi_dbm,rx_snr_db\n"; // file header
+const char* logFileHeader = "event_type,event_time,event_pps_micros,node_id,target_id,packet_id,rx_late7,rx_lnge7,rx_sats,tx_late7,tx_lnge7,tx_sats,rx_rssix10,rx_snrx10,tx_rssix10,tx_snrx10,packet_len\n"; // file header
 char logBuffer[LOG_BUFFER_LEN];
 size_t logIndex = 0;
+uint32_t lastSyncMs;
 volatile bool radioInTx = false;
+volatile bool pps = false;
 
 static QueueHandle_t txReqQueue;
 constexpr uint8_t txReqQueueLen = 4;
@@ -91,23 +93,28 @@ struct GpsFix {
 	int16_t altM;
 	uint8_t sats;
 	bool valid;
+	uint32_t unixTime;
 };
 constexpr uint8_t logQueueLen = 32;
 QueueHandle_t logQueue;
 struct LogEvent {
-    uint64_t eventTimeUs;
-    uint8_t timeValid;
-    uint8_t eventType;
-    uint8_t nodeId;
-    uint32_t packetId;
-    uint8_t gpsValid;
-    int32_t latE7;
-    int32_t lonE7;
-    uint64_t gpsFixTimeUs;
-    uint16_t gpsAgeMs;
-    int16_t rssiDbm;
-    int8_t snrDb;
-	uint8_t packetLen;
+    uint8_t event_type;
+	uint32_t event_time;
+	uint32_t event_pps_micros;
+	uint16_t node_id;
+	uint16_t target_id;
+	uint16_t packet_id;
+	int32_t rx_late7;
+	int32_t rx_lnge7;
+	uint8_t rx_sats;
+	int32_t tx_late7;
+	int32_t tx_lnge7;
+	uint8_t tx_sats;
+	int16_t rx_rssix10;
+	int16_t rx_snrx10;
+	int16_t tx_rssix10;
+	int16_t tx_snrx10;
+	uint8_t packet_len;
 };
 
 GpsFix latestFix;
@@ -151,6 +158,21 @@ bool appendToLogBuffer(const char*, size_t);
 void onRadioDio1(void);
 void handleRxDone(uint32_t);
 void pollTx(void*);
+void activatePPS(void);
+void handle_location(const struct LocationPacket*, bool, int16_t, int16_t);
+
+static int32_t days_from_civil(int y, int m, int d){
+	y -= m <= 2;
+	int32_t era = (y >= 0 ? y : y-399) / 400;
+	int32_t yoe = y - era * 400;
+	int32_t doy = (153*(m + (m > 2 ? -3 : 9)) + 2)/5 + d-1;
+	int32_t doe = yoe * 365 + yoe/4 - yoe/100 + doy;
+	return era * 146097 + doe - 719468;
+}
+
+void activatePPS(void){
+	Serial.println("pps");
+}
 
 
 void txTelemetry(void* parameter){
@@ -169,6 +191,38 @@ void blinkLED(void* parameter){
 		digitalWrite(LED_BUILTIN, LOW);
 		vTaskDelay(pdMS_TO_TICKS(1000));
 	}
+}
+
+bool logWriteToCsv(struct LogEvent& event){
+	char line[160];
+    int len = snprintf(
+        line,
+        sizeof(line),
+        "%u,%" PRIu32 ",%" PRIu32 ",%" PRIu16 ",%" PRIu16 ",%" PRIu16 ",%" PRId32 ",%" PRId32 ",%u,%" PRId32 ",%" PRId32 ",%u,%" PRId16 ",%" PRId16 ",%" PRId16 ",%" PRId16 ",%u\n",
+        (unsigned)event.event_type,
+        event.event_time,
+        event.event_pps_micros,
+        event.node_id,
+        event.target_id,
+        event.packet_id,
+        event.rx_late7,
+        event.rx_lnge7,
+        (unsigned)event.rx_sats,
+        event.tx_late7,
+        event.tx_lnge7,
+        (unsigned)event.tx_sats,
+        event.rx_rssix10,
+        event.rx_snrx10,
+        event.tx_rssix10,
+        event.tx_snrx10,
+        (unsigned)event.packet_len
+    );
+
+	if(len <= 0 || len >= (int)sizeof(line)){
+		return false;
+	}
+
+	return appendToLogBuffer(line, (size_t)len);
 }
 
 void writeLogTask(void* parameter){
@@ -205,12 +259,17 @@ void writeLogTask(void* parameter){
 	//logFile.print(logFileHeader);
 	appendToLogBuffer(logFileHeader, strlen(logFileHeader)); // do not want to write null term to csv
 	flushLogBuffer(true);
+	Serial.println("wrote header");
 	
 	while(1){
 		struct LogEvent event;
-
-		xQueueSend(logQueue, (void *)&event, 10);
-		vTaskDelay(pdMS_TO_TICKS(1000));
+		if(xQueueReceive(logQueue, (void *)&event, pdMS_TO_TICKS(1000)) == pdTRUE){
+			logWriteToCsv(event);
+		}
+		if ((uint32_t)(millis() - lastSyncMs) > SD_SYNC_PERIOD_MS) {
+			flushLogBuffer(true);
+			lastSyncMs = millis();
+		}
 	}
 }
 
@@ -220,10 +279,27 @@ void gpsPoll(void* parameter){
 			if(gps.encode(Serial1.read())){
 				//Serial.println("new fix");
 				GpsFix fix;
-				fix.lat_E7 = (int32_t)(gps.location.lat() * 10000000.0);
-				fix.lng_E7 = (int32_t)(gps.location.lng() * 10000000.0);
-				fix.altM = (int16_t)(gps.altitude.meters() * 10000000.0);
-				fix.sats = (uint8_t)(gps.satellites.value());
+				fix.valid = gps.location.isValid();
+				if(fix.valid){
+					fix.lat_E7 = (int32_t)(gps.location.lat() * 10000000.0);
+					fix.lng_E7 = (int32_t)(gps.location.lng() * 10000000.0);
+					fix.altM = (int16_t)(gps.altitude.meters());
+					fix.sats = (uint8_t)(gps.satellites.value());
+				} else {
+					fix.lat_E7 = 0;
+					fix.lng_E7 = 0;
+					fix.altM = 0;
+					fix.sats = 0;
+				}
+				if(gps.date.isValid() && gps.time.isValid()){
+					int32_t days = days_from_civil(gps.date.year(), gps.date.month(), gps.date.day());
+					fix.unixTime = (uint32_t)days * 86400UL
+						+ (uint32_t)gps.time.hour() * 3600UL
+						+ (uint32_t)gps.time.minute() * 60UL
+						+ (uint32_t)gps.time.second();
+				} else {
+					fix.unixTime = 0;
+				}
 				xSemaphoreTake(gpsMutexHandle, portMAX_DELAY);
 				latestFix = fix;
 				xSemaphoreGive(gpsMutexHandle);
@@ -269,7 +345,8 @@ bool flushLogBuffer(bool forceSync){
         logFile.flush();   // commits data/metadata more safely
 						   // flush is also very expensive, so should be called infrequently
     }
-
+	
+	Serial.println("sd flushed");
     return true;
 }
 
@@ -356,26 +433,43 @@ void lora_handleRx(void* parameter){
 	}
 }
 
-void handle_location(const struct LocationPacket* loc, bool valid){
-    //uint64_t eventTimeUs = gpsTimeFromMicros(irqMicros);
+void handle_location(const struct LocationPacket* loc, bool valid, int16_t rssi, int16_t snrX10){
     LogEvent log = {};
 
+	if(valid) {
+		log.event_type = SFTRK_FLAG_GPS_VALID;
+		Serial.print("[RX] Valid GPS packet from node: ");
+		Serial.print(loc->header.nodeId);
+		Serial.print("\n");
+	}
+	else {
+		log.event_type = SFTRK_FLAG_GPS_INVALID;
+		Serial.print("[RX] Invalid GPS packet from node: ");
+		Serial.print(loc->header.nodeId);
+		Serial.print("\n");
+	}
 
-	if(valid) log.eventType = SFTRK_FLAG_GPS_VALID;
-	else log.eventType = SFTRK_FLAG_GPS_INVALID;
+	GpsFix fix;
+	xSemaphoreTake(gpsMutexHandle, portMAX_DELAY);
+	fix = latestFix;
+	xSemaphoreGive(gpsMutexHandle);
 
-    //log.eventTimeUs = eventTimeUs;
-	log.eventTimeUs = millis();
-    //log.timeValid = eventTimeUs != 0;
-    log.eventType = SFTRK_FLAG_GPS_VALID;
-    log.rssiDbm = loc->rx_rssi;
-	log.snrDb = loc->rx_snr;
-    //log.snrDb = (int8_t)round(snrFloat * 10);
-    //log.packetLen = ;
-	
-
-    //copyLatestGpsFix(&log.gps);
-	Serial.printf("%d,%d",latestFix.lat_E7, latestFix.lng_E7);
+	log.event_time = fix.unixTime;
+	log.event_pps_micros = 0;
+	log.node_id = loc->header.nodeId;
+	log.target_id = loc->header.targetId;
+	log.packet_id = loc->packet_id;
+	log.rx_late7 = fix.lat_E7;
+	log.rx_lnge7 = fix.lng_E7;
+	log.rx_sats = fix.sats;
+	log.tx_late7 = loc->gps_lat;
+	log.tx_lnge7 = loc->gps_lng;
+	log.tx_sats = loc->gps_numSat;
+	log.rx_rssix10 = rssi;
+	log.rx_snrx10 = snrX10;
+	log.tx_rssix10 = loc->rx_rssi;
+	log.tx_snrx10 = loc->rx_snr;
+	log.packet_len = sizeof(struct LocationPacket);
 
     xQueueSend(logQueue, &log, 0);
 	return;
@@ -417,10 +511,10 @@ void handleRxDone(uint32_t irqMicros) {
 			rejectedForeign++;
 			return;
 		case SFTRK_FLAG_GPS_VALID:
-			handle_location((const struct LocationPacket*)rxBuffer, true);
+			handle_location((const struct LocationPacket*)rxBuffer, true, rssi, (int16_t)round(snrFloat * 10));
 			break;
 		case SFTRK_FLAG_GPS_INVALID:
-			handle_location((const struct LocationPacket*)rxBuffer, false);
+			handle_location((const struct LocationPacket*)rxBuffer, false, rssi, (int16_t)round(snrFloat * 10));
 			break;
 		case SFTRK_FLAG_ACK:
 			handle_ack((const struct AckPacket*)rxBuffer);
@@ -429,18 +523,18 @@ void handleRxDone(uint32_t irqMicros) {
 			break;
 	}
 
-    LogEvent log = {};
-    log.eventTimeUs = irqMicros;
-    //log.timeValid = eventTimeUs != 0;
-	log.timeValid = true;
-    log.eventType = SFTRK_FLAG_GPS_VALID;
-    log.rssiDbm = rssi;
-    log.snrDb = (int8_t)round(snrFloat * 10);
-    log.packetLen = rxLen;
+    //LogEvent log = {};
+    //log.eventTimeUs = irqMicros;
+    ////log.timeValid = eventTimeUs != 0;
+	//log.timeValid = true;
+    //log.eventType = SFTRK_FLAG_GPS_VALID;
+    //log.rssiDbm = rssi;
+    //log.snrDb = (int8_t)round(snrFloat * 10);
+    //log.packetLen = rxLen;
 
-    //copyLatestGpsFix(&log.);
+    ////copyLatestGpsFix(&log.);
 
-    xQueueSend(logQueue, &log, pdMS_TO_TICKS(50));
+    //xQueueSend(logQueue, &log, pdMS_TO_TICKS(50));
 
     // restart receive if needed
     radio.startReceive();
@@ -466,6 +560,10 @@ void pollTx(void* parameter){
 		}
 		vTaskDelay(pdMS_TO_TICKS(20));
 	}
+}
+
+void POLL_PPS_IRQ(void* parameters){
+	return;
 }
 
 void setup(void){
@@ -505,6 +603,8 @@ void setup(void){
 	radio.setCRC(2);
 	radio.explicitHeader();
 	radio.setDio1Action(onRadioDio1);
+
+	attachInterrupt(digitalPinToInterrupt(PPS_GPS_PIN), activatePPS, RISING);
 
 
 	//if(radio_status == RADIOLIB_)
@@ -556,7 +656,10 @@ void setup(void){
 			NULL);
 	Serial.println("led init");
 
+
 	xTaskCreate(pollTx, "Poll for Tx", 1024, NULL, 2, NULL);
+	//xTaskCreate(POLL_PPS_IRQ, "Poll IRQ var for PPS", 1024, NULL, 5, NULL);
+	
 }
 
 void loop(void){

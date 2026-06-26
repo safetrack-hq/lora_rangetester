@@ -319,9 +319,9 @@ void setup(void){
 	pinMode(LED_BUILTIN, OUTPUT);
 	digitalWrite(LED_BUILTIN, LOW);
 	Serial.begin(115200);
-	while(!Serial){
-		delay(1);
-	}
+	//while(!Serial){
+		//delay(1);
+	//}
 	Serial.println("tx_test genesis");
 
 #ifdef _VARIANT_PROMICRO_V2_DIY_
