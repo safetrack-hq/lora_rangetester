@@ -1,0 +1,2 @@
+# Sensitive: range-test CSVs contain GPS coordinates
+resources/*.csv
