@@ -11,6 +11,13 @@
 #include <RadioLib.h>
 #include "pkt.h"
 
+// Modem Parameters (Meshtastic LongFast)
+const float FREQ_MHZ = 906.875;
+const uint8_t SF = 11;
+const unsigned long BW = 250000;
+const uint8_t CR = 5;
+const uint16_t PREAMBLE = 16;
+const uint8_t SYNCWORD = 0x2B;
 
 // Try max SPI clock for an SD. Reduce SPI_CLOCK if errors occur.
 //#define SPI_CLOCK 400000UL   // 400 kHz raw Hz; this fork has no SD_SCK_KHZ
@@ -75,12 +82,14 @@ constexpr uint8_t BUTTON_PIN = PIN_100;
 
 constexpr uint16_t LOG_BUFFER_LEN = 512; // in bytes
 //const char* logFileHeader = "event_time_us,time_valid,utc_iso,event_type,node_id,packet_id,lat_e7,lng_e7,gps_fix_time_us,rssi_dbm,snr_db\n"; // file header
-const char* logFileHeader = "event_type,event_time,event_pps_micros,node_id,target_id,packet_id,rx_late7,rx_lnge7,rx_sats,tx_late7,tx_lnge7,tx_sats,rx_rssix10,rx_snrx10,tx_rssix10,tx_snrx10,packet_len\n"; // file header
+const char* logFileHeader = "event_type,event_time,event_pps_micros,node_id,target_id,packet_id,rx_late7,rx_lnge7,rx_sats,tx_late7,tx_lnge7,tx_sats,rx_rssix10,rx_snrx10,tx_rssix10,tx_snrx10,packet_len,latency_us\n"; // file header
 char logBuffer[LOG_BUFFER_LEN];
 size_t logIndex = 0;
 uint32_t lastSyncMs;
 volatile bool radioInTx = false;
 volatile bool pps = false;
+volatile uint32_t reqLogTxDoneMicros = 0;
+volatile bool awaitingLogResponse = false;
 
 static QueueHandle_t txReqQueue;
 constexpr uint8_t txReqQueueLen = 4;
@@ -115,6 +124,7 @@ struct LogEvent {
 	int16_t tx_rssix10;
 	int16_t tx_snrx10;
 	uint8_t packet_len;
+	uint32_t latency_us;
 };
 
 GpsFix latestFix;
@@ -159,7 +169,7 @@ void onRadioDio1(void);
 void handleRxDone(uint32_t);
 void pollTx(void*);
 void activatePPS(void);
-void handle_location(const struct LocationPacket*, bool, int16_t, int16_t);
+void handle_location(const struct LocationPacket*, bool, int16_t, int16_t, uint32_t);
 
 static int32_t days_from_civil(int y, int m, int d){
 	y -= m <= 2;
@@ -198,7 +208,7 @@ bool logWriteToCsv(struct LogEvent& event){
     int len = snprintf(
         line,
         sizeof(line),
-        "%u,%" PRIu32 ",%" PRIu32 ",%" PRIu16 ",%" PRIu16 ",%" PRIu16 ",%" PRId32 ",%" PRId32 ",%u,%" PRId32 ",%" PRId32 ",%u,%" PRId16 ",%" PRId16 ",%" PRId16 ",%" PRId16 ",%u\n",
+        "%u,%" PRIu32 ",%" PRIu32 ",%" PRIu16 ",%" PRIu16 ",%" PRIu16 ",%" PRId32 ",%" PRId32 ",%u,%" PRId32 ",%" PRId32 ",%u,%" PRId16 ",%" PRId16 ",%" PRId16 ",%" PRId16 ",%u,%" PRIu32 "\n",
         (unsigned)event.event_type,
         event.event_time,
         event.event_pps_micros,
@@ -215,7 +225,8 @@ bool logWriteToCsv(struct LogEvent& event){
         event.rx_snrx10,
         event.tx_rssix10,
         event.tx_snrx10,
-        (unsigned)event.packet_len
+        (unsigned)event.packet_len,
+        event.latency_us
     );
 
 	if(len <= 0 || len >= (int)sizeof(line)){
@@ -385,7 +396,7 @@ void onRadioDio1(void){
 	RadioIrqEvent ev;
 	if(radioInTx){ev.type = RADIO_IRQ_TX_DONE;} // if in tx (startTransmit), cannot receive
 	else{ev.type = RADIO_IRQ_RX_DONE;}
-	ev.microsAtIrq = millis();
+	ev.microsAtIrq = micros();
 
 	BaseType_t woken = pdFALSE; // deterministically fastest way to handle smallest
     xQueueSendFromISR(radioIrqQueue, &ev, &woken);
@@ -404,6 +415,8 @@ void lora_handleRx(void* parameter){
 					break;
 
 				case RADIO_IRQ_TX_DONE:
+					reqLogTxDoneMicros = irq.microsAtIrq;
+					awaitingLogResponse = true;
 					radioInTx = false;
 					radio.startReceive();
 					break;
@@ -433,7 +446,7 @@ void lora_handleRx(void* parameter){
 	}
 }
 
-void handle_location(const struct LocationPacket* loc, bool valid, int16_t rssi, int16_t snrX10){
+void handle_location(const struct LocationPacket* loc, bool valid, int16_t rssi, int16_t snrX10, uint32_t rxIrqMicros){
     LogEvent log = {};
 
 	if(valid) {
@@ -470,6 +483,13 @@ void handle_location(const struct LocationPacket* loc, bool valid, int16_t rssi,
 	log.tx_rssix10 = loc->rx_rssi;
 	log.tx_snrx10 = loc->rx_snr;
 	log.packet_len = sizeof(struct LocationPacket);
+
+	uint32_t latency = 0;
+	if(awaitingLogResponse){
+		latency = rxIrqMicros - reqLogTxDoneMicros; // unsigned wrap-safe
+		awaitingLogResponse = false;
+	}
+	log.latency_us = latency;
 
     xQueueSend(logQueue, &log, 0);
 	return;
@@ -511,10 +531,10 @@ void handleRxDone(uint32_t irqMicros) {
 			rejectedForeign++;
 			return;
 		case SFTRK_FLAG_GPS_VALID:
-			handle_location((const struct LocationPacket*)rxBuffer, true, rssi, (int16_t)round(snrFloat * 10));
+			handle_location((const struct LocationPacket*)rxBuffer, true, rssi, (int16_t)round(snrFloat * 10), irqMicros);
 			break;
 		case SFTRK_FLAG_GPS_INVALID:
-			handle_location((const struct LocationPacket*)rxBuffer, false, rssi, (int16_t)round(snrFloat * 10));
+			handle_location((const struct LocationPacket*)rxBuffer, false, rssi, (int16_t)round(snrFloat * 10), irqMicros);
 			break;
 		case SFTRK_FLAG_ACK:
 			handle_ack((const struct AckPacket*)rxBuffer);
@@ -603,7 +623,14 @@ void setup(void){
 	radio.setCRC(2);
 	radio.explicitHeader();
 	radio.setDio1Action(onRadioDio1);
+	//radio.setOutputPower(21);
 
+	radio.setFrequency(FREQ_MHZ);
+	radio.setSpreadingFactor(SF);
+	radio.setBandwidth(BW);
+	radio.setCodingRate(CR);
+	radio.setPreambleLength(PREAMBLE);
+	//radio.setSyncWord(SYNCWORD);
 	attachInterrupt(digitalPinToInterrupt(PPS_GPS_PIN), activatePPS, RISING);
 
 

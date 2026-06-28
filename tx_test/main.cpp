@@ -16,6 +16,14 @@
 #define LED_BUILTIN LED_BLUE
 #endif
 
+// Modem Parameters (Meshtastic LongFast)
+const float FREQ_MHZ = 906.875;
+const uint8_t SF = 11;
+const unsigned long BW = 250000;
+const uint8_t CR = 5;
+const uint16_t PREAMBLE = 16;
+const uint8_t SYNCWORD = 0x2B;
+
 #ifndef SX126X_CS
 #define SX126X_CS (32 + 13)
 #endif
@@ -352,7 +360,14 @@ void setup(void){
 	radio.setCRC(2);
 	radio.explicitHeader();
 	radio.setDio1Action(onRadioDio1);
+	//radio.setOutputPower(21);
 
+	radio.setFrequency(FREQ_MHZ);
+	radio.setSpreadingFactor(SF);
+	radio.setBandwidth(BW);
+	radio.setCodingRate(CR);
+	radio.setPreambleLength(PREAMBLE);
+	//radio.setSyncWord(SYNCWORD);
 	if(radio.startReceive() != RADIOLIB_ERR_NONE){
 		Serial.println("startReceive failed");
 		while(1){ delay(1); }
