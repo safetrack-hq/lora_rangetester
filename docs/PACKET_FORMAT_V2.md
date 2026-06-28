@@ -121,10 +121,10 @@ One button press → one `REQ_LOG` → one `LocationPacket` reply → one CSV ro
 Header line written to `N<id>_<seq>.csv` on SD:
 
 ```
-event_type,event_time,event_pps_micros,node_id,target_id,packet_id,rx_late7,rx_lnge7,rx_sats,tx_late7,tx_lnge7,tx_sats,rx_rssix10,rx_snrx10,tx_rssix10,tx_snrx10,packet_len
+event_type,event_time,event_pps_micros,node_id,target_id,packet_id,rx_late7,rx_lnge7,rx_sats,tx_late7,tx_lnge7,tx_sats,rx_rssix10,rx_snrx10,tx_rssix10,tx_snrx10,packet_len,latency_us
 ```
 
-17 columns. One row per received `LocationPacket`.
+18 columns. One row per received `LocationPacket`.
 
 ### Field reference
 
@@ -147,6 +147,7 @@ event_type,event_time,event_pps_micros,node_id,target_id,packet_id,rx_late7,rx_l
 | 15 | `tx_rssix10` | int16 | dBm × 10 | `LocationPacket.rx_rssi` (responder's RX of `REQ_LOG`, forward path) | yes |
 | 16 | `tx_snrx10` | int16 | dB × 10 | `LocationPacket.rx_snr` (responder's RX of `REQ_LOG`) | yes |
 | 17 | `packet_len` | uint8 | bytes | `sizeof(struct LocationPacket)` = 23 | yes |
+| 18 | `latency_us` | uint32 | µs | `rxIrqMicros - reqLogTxDoneMicros` (round-trip: REQ_LOG TX_DONE → LocationPacket RX_DONE), local `micros()`; 0 if `!awaitingLogResponse` | yes (0 when unsolicited/missed TX_DONE) |
 
 ### rx vs tx prefix convention
 
@@ -181,9 +182,36 @@ Stored in `GpsFix.unixTime`, snapshotted under the GPS mutex at log time. **0 un
 
 Intended semantics: `micros() - lastPpsMicros`, where `lastPpsMicros` is latched in the PPS rising-edge ISR. Currently `activatePPS()` only prints "pps" and does not latch anything → this column is always 0. Wiring this is a planned task; until then, sub-second event timing is unavailable and `event_time` has ±1 s ambiguity relative to the true UTC second boundary.
 
-### No packet timestamp
+### `latency_us` (round-trip µs)
 
-The `LocationPacket` carries **no transmit timestamp**. Therefore end-to-end airtime/latency is **not computable from a single log row** — only the requester's receive-side `event_time` is recorded. V1's `tx_gps_us` / `rx_gps_us` / `latency_ms` pipeline does not exist in V2. If latency measurement is needed later, a timestamp field must be added to `LocationPacket` (and printed without `%llu` since nRF52 newlib-nano lacks 64-bit printf support — see V1 history for that pitfall).
+The `LocationPacket` carries no transmit timestamp, but the requester measures the **round-trip latency** from radio IRQ timestamps on its own `micros()` clock — no GPS-PPS discipline, no clock sync between nodes:
+
+```
+REQ_LOG TX_DONE IRQ  →  reqLogTxDoneMicros = micros()   (latched in lora_handleRx TX_DONE case)
+                         awaitingLogResponse = true
+
+LocationPacket RX_DONE IRQ  →  rxIrqMicros = micros()    (passed from onRadioDio1 → handleRxDone → handle_location)
+
+latency_us = rxIrqMicros - reqLogTxDoneMicros            (unsigned, single wrap-safe)
+```
+
+`latency_us` is 0 when `awaitingLogResponse` was false (unsolicited `LocationPacket`, or the TX_DONE IRQ was missed). `uint32_t` wraps at ~71.6 min of continuous `micros()` uptime; unsigned subtraction makes a single wrap correct, but a transaction that straddles two wraps would corrupt — in practice a `REQ_LOG`/`LocationPacket` exchange completes in seconds, so this is not a concern.
+
+### What `latency_us` includes
+
+| Component | Typical | Notes |
+|---|---|---|
+| Forward airtime | 50–1300 ms | 6-byte `REQ_LOG` on-air (SF/BW/CR dependent) |
+| Responder turnaround | 1–20 ms | `handleRxDone` → `txPongTask` wakeup → `startTransmit` |
+| Return airtime | 50–1300 ms | 23-byte `LocationPacket` on-air (dominant) |
+| Modem + IRQ handling | 1–5 ms | SX1262 internal + ISR → queue → task |
+| **Total** | ≈ forward + turnaround + return + few ms | Dominated by the two airtimes |
+
+For a fixed SF/BW/CR config the round-trip is roughly constant; variation comes from responder scheduling jitter and SX1262 buffer hold. This is **not** the one-way airtime V1 estimated from two GPS-PPS timestamps — it is the full request/response cycle measured on one local clock.
+
+### Why not `uint64` / GPS-PPS
+
+V1 used two `uint64_t tx_gps_us`/`rx_gps_us` GPS-PPS-synced timestamps and a BigInt subtraction in JS. V2 drops that: the `LocationPacket` no longer carries a transmit timestamp (no `%llu` printf pitfall on nRF52 newlib-nano), and the round-trip fits comfortably in `uint32_t` (~71 min wrap). The PPS latch (`event_pps_micros`) remains a separate, still-unwired sub-second timing feature.
 
 ---
 
@@ -193,7 +221,7 @@ The `LocationPacket` carries **no transmit timestamp**. Therefore end-to-end air
 |---|---|
 | PPS micros latch (`activatePPS` body) | `event_pps_micros` always 0; no sub-second timing |
 | `event_time` requires GPS date+time | 0 until first valid NMEA date+time sentence (post-fix) |
-| `range-lib.js` parser expects V1 column names | **V2 CSV will not parse in `range-testing.html`**. The parser's `pickCol` looks for `rx_lat_e7`/`lat_e7`, `rssi_dbm`/`rssi` (raw dBm), `packet_id`, etc. V2 uses `rx_late7`/`rx_lnge7`, `rx_rssix10` (×10), different column order. Updating `range-lib.js` is a separate task. |
+| `range-lib.js` parser expects V1 column names | **Resolved** — `range-lib.js` now prefers V2 columns (`rx_late7`/`tx_late7`, `rx_rssix10` ÷ 10, `latency_us`) and keeps V1 aliases (`lat_e7`/`tx_lat_e7`, `rssi_dbm`, `tx_gps_us`/`rx_gps_us`) as a fallback so legacy logs still load. V2 CSV parses in `range-testing.html`. |
 | `gps_avgGsvSnr` in `LocationPacket` | Reserved, always 0 from tx_test |
 | `tx_rssix10` / `tx_snrx10` value | Reflects responder's RX of the `REQ_LOG` (6-byte packet). RSSI on a 6-byte packet is still a valid link-quality sample. |
 
@@ -203,10 +231,10 @@ The `LocationPacket` carries **no transmit timestamp**. Therefore end-to-end air
 
 - **Beacon struct removed.** Replaced by `Header` + `AckPacket` (6 B) + `LocationPacket` (23 B) in `pkt.h`. No more 22-byte `Beacon` with `uint64 tx_gps_us`.
 - **Request/response model.** V1 was a one-way broadcast beacon. V2 is a two-step `REQ_LOG` → `LocationPacket` transaction, so the requester can measure return-path RSSI/SNR and the responder can measure forward-path RSSI/SNR.
-- **CSV restructured.** 14 cols → 17 cols. New identity block (`node_id`, `target_id`, `packet_id`), split GPS into `rx_*` / `tx_*`, split RSSI/SNR into `rx_*` / `tx_*`, added `event_pps_micros` and `packet_len`. Dropped `utc_iso`, `time_valid`, `gps_fix_time_us`, `tx_gps_us`, `rx_gps_us`.
+- **CSV restructured.** 14 cols → 18 cols. New identity block (`node_id`, `target_id`, `packet_id`), split GPS into `rx_*` / `tx_*`, split RSSI/SNR into `rx_*` / `tx_*`, added `event_pps_micros`, `packet_len`, and `latency_us`. Dropped `utc_iso`, `time_valid`, `gps_fix_time_us`.
 - **RSSI/SNR stored ×10** (int16), not raw float dBm. Avoids float on MCU, matches wire format.
-- **`packet_id` retained** (was in V1, dropped during V2 struct refactor, now restored) for packet-delivery-ratio computation once the parser is updated.
-- **Latency column removed.** No `tx_gps_us`/`rx_gps_us`; latency is not computed. See §6.
+- **`packet_id` retained** (was in V1, dropped during V2 struct refactor, now restored) for packet-delivery-ratio computation.
+- **Latency reworked.** V1's two GPS-PPS-synced `tx_gps_us`/`rx_gps_us` (BigInt subtraction, requires clock sync) replaced by a single `latency_us` round-trip µs measured from radio IRQ timestamps on the requester's local `micros()` — no GPS-PPS discipline, no `%llu` pitfall. See §6.
 
 ---
 
@@ -217,4 +245,4 @@ The `LocationPacket` carries **no transmit timestamp**. Therefore end-to-end air
 - `tx_test/main.cpp` — responder/beacon firmware (tx_test env): `txPongTask`, `handleRxDone`
 - `platformio.ini` — env definitions, `NODE_ID` build flags
 - `docs/PACKET_FORMAT_V1.md` — previous format (retired 22-byte beacon + 14-col CSV)
-- `range-lib.js` — log processor (NOT yet V2-compatible; see §7)
+- `range-lib.js` — log processor (V2-compatible: prefers `rx_late7`/`tx_late7`/`rx_rssix10`/`latency_us`, falls back to V1 `lat_e7`/`tx_lat_e7`/`rssi_dbm`/`tx_gps_us`)

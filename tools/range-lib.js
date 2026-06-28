@@ -93,24 +93,32 @@
   }
 
   function hasTxColumns(idx) {
-    return pickCol(idx, 'tx_lat_e7', 'tx_lat') !== -1 &&
-           pickCol(idx, 'tx_lng_e7', 'tx_lng', 'tx_lon') !== -1;
+    return pickCol(idx, 'tx_late7', 'tx_lat_e7', 'tx_lat') !== -1 &&
+           pickCol(idx, 'tx_lnge7', 'tx_lng_e7', 'tx_lng', 'tx_lon') !== -1;
   }
 
   // idx: header map, rows: string[][], ref: {lat,lng} | null (used when no tx_* columns)
+  // V2 columns (rx_late7/tx_late7/rx_rssix10/latency_us…) are preferred; V1 aliases
+  // (lat_e7/tx_lat_e7/rssi_dbm/tx_gps_us…) remain as a fallback so legacy logs still load.
   function processRows(idx, rows, ref) {
     var ci = {
-      rxLat:  pickCol(idx, 'rx_lat_e7', 'lat_e7', 'rx_lat'),
-      rxLng:  pickCol(idx, 'rx_lng_e7', 'lng_e7', 'rx_lng', 'lon_e7'),
-      txLat:  pickCol(idx, 'tx_lat_e7', 'tx_lat'),
-      txLng:  pickCol(idx, 'tx_lng_e7', 'tx_lng', 'tx_lon'),
-      rssi:   pickCol(idx, 'rssi_dbm', 'rssi'),
-      snr:    pickCol(idx, 'snr_db', 'snr'),
+      rxLat:  pickCol(idx, 'rx_late7', 'rx_lat_e7', 'lat_e7', 'rx_lat'),
+      rxLng:  pickCol(idx, 'rx_lnge7', 'rx_lng_e7', 'lng_e7', 'rx_lng', 'lon_e7'),
+      txLat:  pickCol(idx, 'tx_late7', 'tx_lat_e7', 'tx_lat'),
+      txLng:  pickCol(idx, 'tx_lnge7', 'tx_lng_e7', 'tx_lng', 'tx_lon'),
+      rssi:   pickCol(idx, 'rx_rssix10', 'rssi_dbm', 'rssi'),
+      snr:    pickCol(idx, 'rx_snrx10', 'snr_db', 'snr'),
       pid:    pickCol(idx, 'packet_id', 'pid'),
-      txGpsUs: pickCol(idx, 'tx_gps_us'),
-      rxGpsUs: pickCol(idx, 'rx_gps_us')
+      latencyUs: pickCol(idx, 'latency_us'),
+      txGpsUs:   pickCol(idx, 'tx_gps_us'),   // V1 legacy: two GPS-PPS timestamps
+      rxGpsUs:   pickCol(idx, 'rx_gps_us')
     };
-    var E7 = function (v) { return parseFloat(v) / 1e7; };
+    // V2 stores RSSI/SNR as int × 10 (dBm×10 / dB×10). Detect by column name so
+    // legacy float-dBm columns keep their value.
+    var rssiX10 = 'rx_rssix10' in idx;
+    var snrX10  = 'rx_snrx10'  in idx;
+    var E7  = function (v) { return parseFloat(v) / 1e7; };
+    var x10 = function (v) { return parseInt(v, 10) / 10; };
     var out = [];
     for (var k = 0; k < rows.length; k++) {
       var r = rows[k];
@@ -124,14 +132,21 @@
       if (rxLat === 0 && rxLng === 0) continue;   // RX no-fix sentinel
       if (txLat === 0 && txLng === 0) continue;    // TX no-fix sentinel (verified guard)
       var h = haversine(rxLat, rxLng, txLat, txLng);
-      var rssi = ci.rssi >= 0 ? parseFloat(r[ci.rssi]) : NaN;
-      var snr = ci.snr >= 0 ? parseFloat(r[ci.snr]) : NaN;
-      var pid = ci.pid >= 0 ? parseInt(r[ci.pid], 10) : NaN;
-      // Latency: BigInt subtraction to avoid floating-point precision loss
-      // at large Unix-µs magnitudes (~1.78e15 in 2026). Result is a small
-      // number (~1.2e6 for 1.2 s airtime) which converts cleanly to ms.
+      var rssi = ci.rssi >= 0 ? (rssiX10 ? x10(r[ci.rssi]) : parseFloat(r[ci.rssi])) : NaN;
+      var snr  = ci.snr  >= 0 ? (snrX10  ? x10(r[ci.snr])  : parseFloat(r[ci.snr]))  : NaN;
+      var pid  = ci.pid  >= 0 ? parseInt(r[ci.pid], 10) : NaN;
+      // Latency. V2: single uint32 latency_us round-trip (REQ_LOG TX_DONE →
+      // LocationPacket RX_DONE), local micros() — fits in Number (max ~4.3e9
+      // < 2^53), no BigInt needed. V1 fallback: two uint64 GPS-PPS timestamps
+      // via BigInt subtraction (legacy logs).
       var latencyMs = NaN;
-      if (ci.txGpsUs >= 0 && ci.rxGpsUs >= 0) {
+      if (ci.latencyUs >= 0) {
+        var usStr = r[ci.latencyUs];
+        if (usStr) {
+          var us = parseInt(usStr, 10);
+          if (isFinite(us)) latencyMs = us / 1000;
+        }
+      } else if (ci.txGpsUs >= 0 && ci.rxGpsUs >= 0) {
         var txStr = r[ci.txGpsUs];
         var rxStr = r[ci.rxGpsUs];
         if (txStr && rxStr) {

@@ -58,11 +58,21 @@ PRESETS = {
 }
 
 SPARKLINE_CHARS = '▁▂▃▄▅▆▇█'
+# V2 18-column header — must match src/main.cpp logFileHeader exactly.
+# See docs/PACKET_FORMAT_V2.md §5.
 CSV_HEADER = (
-    'time_valid,utc_iso,event_type,node_id,packet_id,'
-    'lat_e7,lng_e7,gps_fix_time_us,rssi_dbm,snr_db,'
-    'tx_lat_e7,tx_lng_e7,tx_gps_us,rx_gps_us'
+    'event_type,event_time,event_pps_micros,node_id,target_id,packet_id,'
+    'rx_late7,rx_lnge7,rx_sats,tx_late7,tx_lnge7,tx_sats,'
+    'rx_rssix10,rx_snrx10,tx_rssix10,tx_snrx10,packet_len,latency_us'
 )
+
+# V2 wire constants (mirror include/pkt.h)
+SFTRK_FLAG_GPS_VALID = 0x10
+SFTRK_FLAG_GPS_INVALID = 0x20
+LOCATION_PACKET_LEN = 23
+REQ_LOG_LEN = 6
+DEFAULT_NODE_ID = 2      # responder is the tx_test node
+DEFAULT_TARGET_ID = 1    # requester is the nicenano node
 
 
 # ── Geodesy ───────────────────────────────────────────────────────────
@@ -219,31 +229,38 @@ def _radial_routes(tx_lat, tx_lng, count, max_range_km, gps_noise_sigma):
     return pts
 
 
-# ── Row Generation (with gap support) ────────────────────────────────
+# ── Row Generation (V2, with gap support) ─────────────────────────────
+# Emits the V2 18-column row (see CSV_HEADER). One FSPL(d) per row drives
+# both rx_rssix10 (requester RX of LocationPacket, return path) and
+# tx_rssix10 (responder RX of REQ_LOG, forward path); each gets its own
+# independent gaussian jitter to model two real radio measurements of the
+# same link. RSSI/SNR are stored ×10 as int (dBm×10 / dB×10), matching the
+# wire format and the MCU log writer.
+#
+# latency_us models the firmware's round-trip measurement
+# (rxIrqMicros - reqLogTxDoneMicros): forward airtime (6-byte REQ_LOG) +
+# responder turnaround + return airtime (23-byte LocationPacket) + jitter.
 def generate_rows(rx_points, tx_lat, tx_lng, f_mhz, ptx, gt, gr, loss,
                   beacon_interval, start_utc, rssi_sigma=3.0, snr_sigma=2.0,
                   noise_floor=NOISE_FLOOR_DEFAULT,
                   gap_rate=0.0, drop_curve_km=None, max_range_km=None,
-                  sf=12, bw_khz=125, cr=1, payload_bytes=22,
-                  start_unix_us=None, latency_jitter_us=3000):
+                  sf=12, bw_khz=125, cr=1,
+                  node_id=DEFAULT_NODE_ID, target_id=DEFAULT_TARGET_ID,
+                  sats_min=5, sats_max=12,
+                  turnaround_us=20000, latency_jitter_us=3000):
     rows = []
     pid = 1
-    time_us = 0
-    dt = start_utc
+    base_unix_sec = int(start_utc.replace(tzinfo=timezone.utc).timestamp())
 
-    # Compute expected airtime for this SF/BW/CR/payload config
-    airtime_us = semtech_airtime_us(sf, bw_khz, cr, payload_bytes)
-
-    # Base Unix-µs time for the first TX packet. If not provided, use
-    # the start_utc datetime converted to Unix-µs.
-    if start_unix_us is None:
-        start_unix_us = int(start_utc.replace(tzinfo=timezone.utc).timestamp() * 1_000_000)
+    # Airtimes for the two packet sizes in the transaction
+    fwd_airtime_us = semtech_airtime_us(sf, bw_khz, cr, REQ_LOG_LEN)          # 6-byte REQ_LOG
+    ret_airtime_us = semtech_airtime_us(sf, bw_khz, cr, LOCATION_PACKET_LEN)  # 23-byte LocationPacket
 
     for (rx_lat, rx_lng) in rx_points:
         dist_m = haversine(tx_lat, tx_lng, rx_lat, rx_lng)
         d_km = dist_m / 1000
 
-        # Decide whether to drop this packet (simulate loss)
+        # Decide whether to drop this transaction (simulate loss)
         drop = False
         if drop_curve_km and max_range_km and max_range_km > 0:
             threshold = drop_curve_km * 0.5
@@ -258,36 +275,44 @@ def generate_rows(rx_points, tx_lat, tx_lng, f_mhz, ptx, gt, gr, loss,
 
         # Compute RSSI/SNR (even for dropped packets, for internal use — but we skip output)
         if d_km > 0:
-            rssi = rssi_at_distance(d_km, f_mhz, ptx, gt, gr, loss)
-            rssi += random.gauss(0, rssi_sigma)
+            rssi_link = rssi_at_distance(d_km, f_mhz, ptx, gt, gr, loss)
         else:
-            rssi = -30 + random.gauss(0, rssi_sigma)
+            rssi_link = -30
 
         if not drop:
-            snr = snr_from_rssi(rssi, noise_floor, snr_sigma)
-            # GPS-PPS timestamps: TX at transmit, RX = TX + airtime + jitter
-            tx_gps_us = start_unix_us + time_us
-            rx_gps_us = tx_gps_us + airtime_us + int(random.gauss(0, latency_jitter_us))
+            # Two independent measurements of the same link: forward path
+            # (responder RX of 6-byte REQ_LOG) and return path (requester RX
+            # of 23-byte LocationPacket). Same FSPL, independent jitter.
+            rssi_ret = rssi_link + random.gauss(0, rssi_sigma)
+            rssi_fwd = rssi_link + random.gauss(0, rssi_sigma)
+            snr_ret  = snr_from_rssi(rssi_ret, noise_floor, snr_sigma)
+            snr_fwd  = snr_from_rssi(rssi_fwd, noise_floor, snr_sigma)
+            event_time = base_unix_sec + int((pid - 1) * beacon_interval)
+            # Round-trip µs: REQ_LOG TX_DONE → LocationPacket RX_DONE
+            latency_us = (fwd_airtime_us + turnaround_us + ret_airtime_us +
+                          int(random.gauss(0, latency_jitter_us)))
             rows.append({
-                'time_valid': 1,
-                'utc_iso': dt.strftime('%Y-%m-%dT%H:%M:%SZ'),
-                'event_type': 2,
-                'node_id': 1,
+                'event_type': SFTRK_FLAG_GPS_VALID,
+                'event_time': event_time,
+                'event_pps_micros': 0,
+                'node_id': node_id,
+                'target_id': target_id,
                 'packet_id': pid,
-                'lat_e7': lat_to_e7(rx_lat),
-                'lng_e7': lng_to_e7(rx_lng),
-                'gps_fix_time_us': time_us,
-                'rssi_dbm': round(rssi, 1),
-                'snr_db': round(snr, 1),
-                'tx_lat_e7': lat_to_e7(tx_lat),
-                'tx_lng_e7': lng_to_e7(tx_lng),
-                'tx_gps_us': tx_gps_us,
-                'rx_gps_us': rx_gps_us,
+                'rx_late7': lat_to_e7(rx_lat),
+                'rx_lnge7': lng_to_e7(rx_lng),
+                'rx_sats': random.randint(sats_min, sats_max),
+                'tx_late7': lat_to_e7(tx_lat),
+                'tx_lnge7': lng_to_e7(tx_lng),
+                'tx_sats': random.randint(sats_min, sats_max),
+                'rx_rssix10': int(round(rssi_ret * 10)),
+                'rx_snrx10':  int(round(snr_ret * 10)),
+                'tx_rssix10': int(round(rssi_fwd * 10)),
+                'tx_snrx10':  int(round(snr_fwd * 10)),
+                'packet_len': LOCATION_PACKET_LEN,
+                'latency_us': int(latency_us),
             })
 
         pid += 1
-        time_us += int(beacon_interval * 1e6)
-        dt += timedelta(seconds=beacon_interval)
 
     return rows
 
@@ -299,11 +324,15 @@ def inject_nofix_rows(rows, count=1):
     for idx in nofix_indices:
         is_tx = random.random() < 0.5
         if is_tx:
-            rows[idx]['tx_lat_e7'] = 0
-            rows[idx]['tx_lng_e7'] = 0
+            rows[idx]['tx_late7'] = 0
+            rows[idx]['tx_lnge7'] = 0
+            rows[idx]['tx_sats'] = 0
         else:
-            rows[idx]['lat_e7'] = 0
-            rows[idx]['lng_e7'] = 0
+            rows[idx]['rx_late7'] = 0
+            rows[idx]['rx_lnge7'] = 0
+            rows[idx]['rx_sats'] = 0
+        # Mark the row as GPS_INVALID (0x20) — the responder had no fix.
+        rows[idx]['event_type'] = SFTRK_FLAG_GPS_INVALID
     return rows
 
 
@@ -689,8 +718,9 @@ def _print_summary(rows, cfg):
         return
 
     pids = [r['packet_id'] for r in rows]
-    rssis = [r['rssi_dbm'] for r in rows if r['rssi_dbm'] != '']
-    snrs = [r['snr_db'] for r in rows if r['snr_db'] != '']
+    rssis = [r['rx_rssix10'] / 10 for r in rows]
+    snrs  = [r['rx_snrx10']  / 10 for r in rows]
+    latencies_ms = [r['latency_us'] / 1000 for r in rows]
 
     span = max(pids) - min(pids) + 1
     pdr = len(rows) / span * 100 if span > 0 else 0
@@ -698,10 +728,10 @@ def _print_summary(rows, cfg):
     # Compute distances for summary
     dists_m = []
     for r in rows:
-        rx_lat = r['lat_e7'] / 1e7
-        rx_lng = r['lng_e7'] / 1e7
-        tx_lat = r['tx_lat_e7'] / 1e7
-        tx_lng = r['tx_lng_e7'] / 1e7
+        rx_lat = r['rx_late7'] / 1e7
+        rx_lng = r['rx_lnge7'] / 1e7
+        tx_lat = r['tx_late7'] / 1e7
+        tx_lng = r['tx_lnge7'] / 1e7
         if rx_lat == 0 and rx_lng == 0:
             continue
         if tx_lat == 0 and tx_lng == 0:
@@ -722,14 +752,16 @@ def _print_summary(rows, cfg):
         click.echo(f'  RSSI:     {min(rssis):.1f} → {max(rssis):.1f} dBm  {rssi_spark}')
     if snrs:
         click.echo(f'  SNR:      {min(snrs):.1f} → {max(snrs):.1f} dB   {snr_spark}')
+    if latencies_ms:
+        click.echo(f'  Latency:  {min(latencies_ms):.1f} → {max(latencies_ms):.1f} ms (round-trip)')
     click.echo(f'  Max range: {max_dist_km:.2f} km')
     click.echo(f'  Mean dist: {mean_dist_km:.2f} km')
 
     # ASCII map
     rx_locs = []
     for r in rows:
-        rx_lat = r['lat_e7'] / 1e7
-        rx_lng = r['lng_e7'] / 1e7
+        rx_lat = r['rx_late7'] / 1e7
+        rx_lng = r['rx_lnge7'] / 1e7
         if rx_lat != 0 or rx_lng != 0:
             rx_locs.append((rx_lat, rx_lng))
 

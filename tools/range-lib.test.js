@@ -127,6 +127,35 @@ function fwRow(pid, latE7, lngE7, rssi, snr) {
   return `1000,1,2026-01-01T00:00:00Z,2,1,${pid},${latE7},${lngE7},900,${rssi},${snr}`;
 }
 
+// V2 18-column header (matches src/main.cpp logFileHeader exactly).
+// Columns: event_type,event_time,event_pps_micros,node_id,target_id,packet_id,
+//          rx_late7,rx_lnge7,rx_sats,tx_late7,tx_lnge7,tx_sats,
+//          rx_rssix10,rx_snrx10,tx_rssix10,tx_snrx10,packet_len,latency_us
+const FW_HEADER_V2 = 'event_type,event_time,event_pps_micros,node_id,target_id,packet_id,' +
+                     'rx_late7,rx_lnge7,rx_sats,tx_late7,tx_lnge7,tx_sats,' +
+                     'rx_rssix10,rx_snrx10,tx_rssix10,tx_snrx10,packet_len,latency_us';
+
+// V2 row helper. rssiX10/snrX10 are int ×10 (dBm×10 / dB×10). latencyUs is
+// uint32 round-trip µs. Defaults mimic a valid GPS fix (event_type=0x10) from
+// responder node 2 → requester node 1.
+function v2Row(pid, rxLatE7, rxLngE7, txLatE7, txLngE7, rssiX10, snrX10, latencyUs, opts) {
+  const o = opts || {};
+  const eventType = o.eventType != null ? o.eventType : 0x10;          // 0x10 GPS_VALID
+  const eventTime = o.eventTime != null ? o.eventTime : 1782509187;    // unix seconds
+  const pps = o.pps != null ? o.pps : 0;
+  const nodeId = o.nodeId != null ? o.nodeId : 2;
+  const targetId = o.targetId != null ? o.targetId : 1;
+  const rxSats = o.rxSats != null ? o.rxSats : 7;
+  const txSats = o.txSats != null ? o.txSats : 7;
+  const txRssiX10 = o.txRssiX10 != null ? o.txRssiX10 : rssiX10;
+  const txSnrX10  = o.txSnrX10  != null ? o.txSnrX10  : snrX10;
+  const pktLen = o.pktLen != null ? o.pktLen : 23;
+  const lat = latencyUs != null ? latencyUs : 0;
+  return `${eventType},${eventTime},${pps},${nodeId},${targetId},${pid},` +
+         `${rxLatE7},${rxLngE7},${rxSats},${txLatE7},${txLngE7},${txSats},` +
+         `${rssiX10},${snrX10},${txRssiX10},${txSnrX10},${pktLen},${lat}`;
+}
+
 test('parseCSV: lower-cases header into an index map', () => {
   const { idx, rows } = RL.parseCSV(FW_HEADER + '\n' + fwRow(1, 370000000, -1220000000, -100, 5));
   assert.equal(idx['packet_id'], 5);
@@ -252,6 +281,126 @@ test('rssiColor: strong→green, near-floor→red, missing→grey', () => {
   assert.equal(RL.rssiColor(NaN), '#6a6078');
 });
 
+/* ============================ V2 18-col CSV parsing + log processing ============================ */
+test('V2 parseCSV: 18-column header maps every V2 field', () => {
+  const { idx, rows } = RL.parseCSV(FW_HEADER_V2 + '\n' +
+    v2Row(1, 334255000, -1119400000, 334255000, -1119400000, -953, 52, 1330));
+  assert.equal(idx['event_type'], 0);
+  assert.equal(idx['packet_id'], 5);
+  assert.equal(idx['rx_late7'], 6);
+  assert.equal(idx['rx_lnge7'], 7);
+  assert.equal(idx['tx_late7'], 9);
+  assert.equal(idx['tx_lnge7'], 10);
+  assert.equal(idx['rx_rssix10'], 12);
+  assert.equal(idx['rx_snrx10'], 13);
+  assert.equal(idx['packet_len'], 16);
+  assert.equal(idx['latency_us'], 17);
+  assert.equal(rows.length, 1);
+});
+
+test('V2 hasTxColumns: true (tx_late7/tx_lnge7 present)', () => {
+  assert.equal(RL.hasTxColumns(RL.parseCSV(FW_HEADER_V2).idx), true);
+});
+
+test('V2 processRows: rx_rssix10/rx_snrx10 divided by 10 → dBm/dB', () => {
+  const csv = FW_HEADER_V2 + '\n' + v2Row(1, 334255000, -1119400000, 334255000, -1119400000, -953, 52, 1330);
+  const { idx, rows } = RL.parseCSV(csv);
+  const pts = RL.processRows(idx, rows, null);
+  assert.equal(pts.length, 1);
+  near(pts[0].rssi, -95.3, 1e-9, 'rssi -953/10 = -95.3 dBm');
+  near(pts[0].snr, 5.2, 1e-9, 'snr 52/10 = 5.2 dB');
+});
+
+test('V2 processRows: dual-GPS distance from rx_late7/tx_late7', () => {
+  // rx 0.01° north of tx → ~1111.95 m
+  const csv = FW_HEADER_V2 + '\n' +
+    v2Row(1, 370100000, -1220000000, 370000000, -1220000000, -950, 50, 1330);
+  const { idx, rows } = RL.parseCSV(csv);
+  const pts = RL.processRows(idx, rows, null);
+  assert.equal(pts.length, 1);
+  near(pts[0].dist, 1111.95, 1, 'rx↔tx 0.01° apart');
+});
+
+test('V2 processRows: RX no-fix (0,0) rows are dropped', () => {
+  const csv = FW_HEADER_V2 + '\n' +
+    v2Row(1, 334255000, -1119400000, 334255000, -1119400000, -950, 50, 1330) + '\n' +
+    v2Row(2, 0, 0, 334255000, -1119400000, -1200, -80, 1400);
+  const { idx, rows } = RL.parseCSV(csv);
+  const pts = RL.processRows(idx, rows, null);
+  assert.equal(pts.length, 1, 'the RX 0,0 row is skipped');
+  assert.equal(pts[0].pid, 1);
+});
+
+test('V2 processRows: TX no-fix (0,0) rows are dropped', () => {
+  const csv = FW_HEADER_V2 + '\n' +
+    v2Row(1, 334255000, -1119400000, 334255000, -1119400000, -950, 50, 1330) + '\n' +
+    v2Row(2, 334255000, -1119400000, 0, 0, -1000, 40, 1400);
+  const { idx, rows } = RL.parseCSV(csv);
+  const pts = RL.processRows(idx, rows, null);
+  assert.equal(pts.length, 1, 'the TX 0,0 row is skipped');
+  assert.equal(pts[0].pid, 1);
+});
+
+test('V2 processRows: latency_us → latencyMs = us/1000 (uint32 fits in Number)', () => {
+  // SF12/125k round-trip ~2.6s. 2,600,000 µs → 2600 ms. uint32 max ~4.3e9 < 2^53.
+  const csv = FW_HEADER_V2 + '\n' +
+    v2Row(1, 334255000, -1119400000, 334255000, -1119400000, -950, 50, 2600000) + '\n' +
+    v2Row(2, 334255000, -1119400000, 334255000, -1119400000, -960, 48, 2550000);
+  const { idx, rows } = RL.parseCSV(csv);
+  const pts = RL.processRows(idx, rows, null);
+  assert.equal(pts.length, 2);
+  assert.ok(Math.abs(pts[0].latencyMs - 2600) < 1e-6, `latency ${pts[0].latencyMs}`);
+  assert.ok(Math.abs(pts[1].latencyMs - 2550) < 1e-6, `latency ${pts[1].latencyMs}`);
+});
+
+test('V2 processRows: latency_us = 0 (unsolicited) → latencyMs = 0, not NaN', () => {
+  const csv = FW_HEADER_V2 + '\n' +
+    v2Row(1, 334255000, -1119400000, 334255000, -1119400000, -950, 50, 0);
+  const { idx, rows } = RL.parseCSV(csv);
+  const pts = RL.processRows(idx, rows, null);
+  assert.equal(pts.length, 1);
+  assert.equal(pts[0].latencyMs, 0, 'latency_us=0 → latencyMs=0 (unsolicited/missed TX_DONE sentinel)');
+});
+
+test('V2 processRows: V2 latency_us takes precedence over V1 tx_gps_us when both present', () => {
+  // Synthetic header with both latency_us and the V1 timestamp pair — V2 wins.
+  const header = FW_HEADER_V2 + ',tx_gps_us,rx_gps_us';
+  const row = v2Row(1, 334255000, -1119400000, 334255000, -1119400000, -950, 50, 2600) +
+              ',1718123456123000,1718123456125300';  // V1 would give 2.3 ms
+  const { idx, rows } = RL.parseCSV(header + '\n' + row);
+  const pts = RL.processRows(idx, rows, null);
+  assert.equal(pts.length, 1);
+  assert.ok(Math.abs(pts[0].latencyMs - 2.6) < 1e-6, `V2 latency_us should win: ${pts[0].latencyMs}`);
+});
+
+test('V2 summarize: meanLatency/maxLatency from latency_us; PDR from packet_id', () => {
+  const csv = FW_HEADER_V2 + '\n' +
+    v2Row(1, 334255000, -1119400000, 334255000, -1119400000, -900, 70, 2600000) + '\n' +
+    v2Row(2, 334255000, -1119400000, 334255000, -1119400000, -1000, 20, 2700000) + '\n' +
+    v2Row(4, 334255000, -1119400000, 334255000, -1119400000, -1150, -50, 2650000);  // pid 3 missing
+  const { idx, rows } = RL.parseCSV(csv);
+  const pts = RL.processRows(idx, rows, null);
+  const s = RL.summarize(pts);
+  assert.equal(s.count, 3);
+  near(s.pdr, 75, 1e-9, '3 received over span 4 = 75%');                  // pids 1,2,4
+  assert.equal(s.bestRssi, -90);
+  assert.equal(s.worstRssi, -115);
+  // latency_us 2,600,000 / 2,700,000 / 2,650,000 µs → 2600 / 2700 / 2650 ms; mean = 2650
+  assert.ok(Math.abs(s.meanLatency - 2650) < 1e-6, `meanLatency ${s.meanLatency}`);
+  assert.equal(s.maxLatency, 2700);
+});
+
+test('V2 processRows: corrupt/short rows skipped gracefully (resources capture shape)', () => {
+  // Real V2 captures have produced rows with shifted columns / non-numeric
+  // fields (firmware printf bug). processRows must skip them via isFinite
+  // + the (0,0) no-fix guard, not throw.
+  const csv = FW_HEADER_V2 + '\n' +
+    'hu,16,1782509187,0,2,1,0,hu,0,0,hu,29089,-9586,7,-99,hu,0';  // tx 0,0 + junk
+  const { idx, rows } = RL.parseCSV(csv);
+  const pts = RL.processRows(idx, rows, null);
+  assert.ok(Array.isArray(pts), 'processRows must not throw on malformed rows');
+});
+
 /* ============================ Python generator fixtures ============================ */
 const FIXTURES = [
   { name: 'minimal', hasTx: true, minRows: 1, hasGaps: false },
@@ -329,13 +478,13 @@ test('fixture: gaps — drop rows produce gaps in packet_ids', () => {
 test('fixture: nofix — no-fix rows are dropped by processRows', () => {
   const csv = loadFixture('nofix');
   const { idx, rows } = RL.parseCSV(csv);
-  // Verify no-fix sentinel rows exist in raw CSV
+  // Verify no-fix sentinel rows exist in raw CSV (V2 columns)
   let nofixRaw = 0;
   for (const r of rows) {
-    const rxLat = parseInt(r[idx['lat_e7']]) / 1e7;
-    const rxLng = parseInt(r[idx['lng_e7']]) / 1e7;
-    const txLat = parseInt(r[idx['tx_lat_e7']]) / 1e7;
-    const txLng = parseInt(r[idx['tx_lng_e7']]) / 1e7;
+    const rxLat = parseInt(r[idx['rx_late7']], 10) / 1e7;
+    const rxLng = parseInt(r[idx['rx_lnge7']], 10) / 1e7;
+    const txLat = parseInt(r[idx['tx_late7']], 10) / 1e7;
+    const txLng = parseInt(r[idx['tx_lnge7']], 10) / 1e7;
     if ((rxLat === 0 && rxLng === 0) || (txLat === 0 && txLng === 0)) nofixRaw++;
   }
   assert.ok(nofixRaw > 0, 'nofix fixture must contain at least one (0,0) sentinel row');
@@ -348,18 +497,21 @@ test('fixture: nofix — no-fix rows are dropped by processRows', () => {
   assert.ok(s.count > 0);
 });
 
-test('fixture: all preset CSVs have consistent dual-GPS header', () => {
+test('fixture: all preset CSVs have consistent V2 dual-GPS header', () => {
   const names = ['minimal', 'gaps', 'nofix', 'realistic_short', 'realistic_long'];
   for (const name of names) {
     const csv = loadFixture(name);
     const { idx } = RL.parseCSV(csv);
-    assert.ok('tx_lat_e7' in idx, `${name} must have tx_lat_e7`);
-    assert.ok('tx_lng_e7' in idx, `${name} must have tx_lng_e7`);
-    assert.ok('lat_e7' in idx, `${name} must have lat_e7`);
-    assert.ok('lng_e7' in idx, `${name} must have lng_e7`);
-    assert.ok('rssi_dbm' in idx, `${name} must have rssi_dbm`);
-    assert.ok('snr_db' in idx, `${name} must have snr_db`);
+    assert.ok('tx_late7' in idx, `${name} must have tx_late7`);
+    assert.ok('tx_lnge7' in idx, `${name} must have tx_lnge7`);
+    assert.ok('rx_late7' in idx, `${name} must have rx_late7`);
+    assert.ok('rx_lnge7' in idx, `${name} must have rx_lnge7`);
+    assert.ok('rx_rssix10' in idx, `${name} must have rx_rssix10`);
+    assert.ok('rx_snrx10' in idx, `${name} must have rx_snrx10`);
     assert.ok('packet_id' in idx, `${name} must have packet_id`);
+    assert.ok('event_type' in idx, `${name} must have event_type`);
+    assert.ok('packet_len' in idx, `${name} must have packet_len`);
+    assert.ok('latency_us' in idx, `${name} must have latency_us`);
   }
 });
 

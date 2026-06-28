@@ -295,8 +295,9 @@ class TestGenerateRows:
                                915, 22, 2.15, 2.15, 1,
                                1.5, datetime(2026, 6, 17, 14, 32, 0),
                                rssi_sigma=0)  # no scatter for clean comparison
-        assert rows[0]['rssi_dbm'] > rows[1]['rssi_dbm']
-        assert rows[1]['rssi_dbm'] > rows[2]['rssi_dbm']
+        # rx_rssix10 is int ×10; divide by 10 to compare dBm
+        assert rows[0]['rx_rssix10'] / 10 > rows[1]['rx_rssix10'] / 10
+        assert rows[1]['rx_rssix10'] / 10 > rows[2]['rx_rssix10'] / 10
 
     def test_tx_coords_consistent(self):
         tx = (33.4255, -111.94)
@@ -305,48 +306,89 @@ class TestGenerateRows:
         rows = g.generate_rows(rx, tx[0], tx[1],
                                915, 22, 2.15, 2.15, 1,
                                1.5, datetime(2026, 6, 17, 14, 32, 0))
-        assert rows[0]['tx_lat_e7'] == g.lat_to_e7(33.4255)
-        assert rows[0]['tx_lng_e7'] == g.lng_to_e7(-111.94)
+        assert rows[0]['tx_late7'] == g.lat_to_e7(33.4255)
+        assert rows[0]['tx_lnge7'] == g.lng_to_e7(-111.94)
 
-    def test_timestamps_increment(self):
+    def test_event_time_increments_by_beacon_interval(self):
         tx = (33.4255, -111.94)
         rx = [(33.43, -111.94), (33.44, -111.94)]
         random.seed(42)
         rows = g.generate_rows(rx, tx[0], tx[1],
                                915, 22, 2.15, 2.15, 1,
                                2.0, datetime(2026, 6, 17, 14, 32, 0))
-        assert rows[1]['gps_fix_time_us'] == rows[0]['gps_fix_time_us'] + 2000000
-        assert rows[1]['utc_iso'] == '2026-06-17T14:32:02Z'
+        # event_time is unix seconds; 2s beacon interval → +2s per row
+        assert rows[1]['event_time'] == rows[0]['event_time'] + 2
+
+    def test_v2_identity_and_packet_len(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        assert rows[0]['node_id'] == g.DEFAULT_NODE_ID      # responder (2)
+        assert rows[0]['target_id'] == g.DEFAULT_TARGET_ID  # requester (1)
+        assert rows[0]['packet_len'] == g.LOCATION_PACKET_LEN  # 23
+        assert rows[0]['event_type'] == g.SFTRK_FLAG_GPS_VALID  # 0x10
+
+    def test_event_pps_micros_always_zero(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        assert rows[0]['event_pps_micros'] == 0  # PPS not wired in firmware
+
+    def test_forward_and_return_rssi_independent(self):
+        # Same FSPL(d) but independent jitter → tx_rssix10 != rx_rssix10
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94)] * 20
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0),
+                               rssi_sigma=3.0)
+        diffs = [abs(r['rx_rssix10'] - r['tx_rssix10']) for r in rows]
+        assert max(diffs) > 0, 'forward/return RSSI must differ (independent jitter)'
 
 
 # =========================================================================
-# No-Fix Injection
+# No-Fix Injection (V2)
 # =========================================================================
 class TestInjectNofixRows:
-    def test_modifies_rows_in_place(self):
-        rows = [
-            {'packet_id': 1, 'lat_e7': 334255000, 'lng_e7': -1119400000,
-             'tx_lat_e7': 334255000, 'tx_lng_e7': -1119400000},
-            {'packet_id': 2, 'lat_e7': 334265000, 'lng_e7': -1119300000,
-             'tx_lat_e7': 334255000, 'tx_lng_e7': -1119400000},
+    def _make_rows(self):
+        return [
+            {'event_type': g.SFTRK_FLAG_GPS_VALID, 'event_time': 0, 'event_pps_micros': 0,
+             'node_id': 2, 'target_id': 1, 'packet_id': 1,
+             'rx_late7': 334255000, 'rx_lnge7': -1119400000, 'rx_sats': 7,
+             'tx_late7': 334255000, 'tx_lnge7': -1119400000, 'tx_sats': 7,
+             'rx_rssix10': -950, 'rx_snrx10': 50, 'tx_rssix10': -950, 'tx_snrx10': 50,
+             'packet_len': 23, 'latency_us': 2600000},
+            {'event_type': g.SFTRK_FLAG_GPS_VALID, 'event_time': 0, 'event_pps_micros': 0,
+             'node_id': 2, 'target_id': 1, 'packet_id': 2,
+             'rx_late7': 334265000, 'rx_lnge7': -1119300000, 'rx_sats': 7,
+             'tx_late7': 334255000, 'tx_lnge7': -1119400000, 'tx_sats': 7,
+             'rx_rssix10': -950, 'rx_snrx10': 50, 'tx_rssix10': -950, 'tx_snrx10': 50,
+             'packet_len': 23, 'latency_us': 2700000},
         ]
+
+    def test_modifies_rows_in_place(self):
+        rows = self._make_rows()
         random.seed(42)
         result = g.inject_nofix_rows(rows, count=1)
-        # Function modifies in-place, returns same list (length unchanged)
         assert len(result) == len(rows)
-        # At least one row should now have zeroed coords
-        nofix = [r for r in result if r['lat_e7'] == 0 or r['tx_lat_e7'] == 0]
+        nofix = [r for r in result if r['rx_late7'] == 0 or r['tx_late7'] == 0]
         assert len(nofix) >= 1
 
-    def test_sets_nofix_sentinel(self):
-        rows = [
-            {'packet_id': 1, 'lat_e7': 334255000, 'lng_e7': -1119400000,
-             'tx_lat_e7': 334255000, 'tx_lng_e7': -1119400000},
-        ]
+    def test_sets_nofix_sentinel_and_event_type(self):
+        rows = self._make_rows()
         random.seed(42)
         result = g.inject_nofix_rows(rows, count=1)
-        nofix = [r for r in result if r['lat_e7'] == 0 or r['tx_lat_e7'] == 0]
+        nofix = [r for r in result if r['rx_late7'] == 0 or r['tx_late7'] == 0]
         assert len(nofix) >= 1
+        for r in nofix:
+            assert r['event_type'] == g.SFTRK_FLAG_GPS_INVALID  # 0x20
 
 
 # =========================================================================
@@ -375,21 +417,21 @@ class TestSemtechAirtime:
 
 
 # =========================================================================
-# GPS-PPS Latency Generation
+# Round-trip latency_us Generation (V2 — radio IRQ timestamps, no GPS-PPS)
 # =========================================================================
 class TestLatencyGeneration:
-    def test_rows_have_tx_gps_us_and_rx_gps_us(self):
+    def test_rows_have_latency_us(self):
         tx = (33.4255, -111.94)
         rx = [(33.43, -111.94)]
         random.seed(42)
         rows = g.generate_rows(rx, tx[0], tx[1],
                                915, 22, 2.15, 2.15, 1,
                                1.5, datetime(2026, 6, 17, 14, 32, 0))
-        assert 'tx_gps_us' in rows[0]
-        assert 'rx_gps_us' in rows[0]
-        assert 'event_time_us' not in rows[0]
+        assert 'latency_us' in rows[0]
+        assert 'tx_gps_us' not in rows[0]   # V1 timestamps retired in V2
+        assert 'rx_gps_us' not in rows[0]
 
-    def test_rx_gps_after_tx_gps(self):
+    def test_latency_us_positive(self):
         tx = (33.4255, -111.94)
         rx = [(33.43, -111.94), (33.44, -111.94), (33.45, -111.94)]
         random.seed(42)
@@ -397,12 +439,12 @@ class TestLatencyGeneration:
                                915, 22, 2.15, 2.15, 1,
                                1.5, datetime(2026, 6, 17, 14, 32, 0))
         for r in rows:
-            assert r['rx_gps_us'] > r['tx_gps_us'], \
-                f"rx {r['rx_gps_us']} should be > tx {r['tx_gps_us']}"
+            assert r['latency_us'] > 0, f"latency_us {r['latency_us']} should be > 0"
 
-    def test_latency_within_airtime_plus_jitter(self):
-        # SF12/125k/22B airtime ~1330 ms. With σ=3ms jitter, most
-        # latencies should be within 1.2-1.5 s.
+    def test_latency_within_round_trip_plus_jitter(self):
+        # SF12/125k round-trip = fwd(6B) + turnaround(20ms) + ret(23B).
+        # fwd ~893ms, ret ~1384ms, turnaround 20ms → ~2297ms; jitter σ=3ms.
+        # Allow 2280-2320 ms (±~6σ).
         tx = (33.4255, -111.94)
         rx = [(33.43 + i * 0.01, -111.94) for i in range(20)]
         random.seed(42)
@@ -410,15 +452,12 @@ class TestLatencyGeneration:
                                915, 22, 2.15, 2.15, 1,
                                1.5, datetime(2026, 6, 17, 14, 32, 0),
                                sf=12, bw_khz=125)
-        latencies_ms = [(r['rx_gps_us'] - r['tx_gps_us']) / 1000
-                        for r in rows]
-        for lat in latencies_ms:
-            # SF12/125k/22B airtime = 1384.4 ms; jitter σ=3ms
-            # Allow 1360-1410 ms (4σ range, 2*3ms)
-            assert 1360 < lat < 1410, f"latency {lat} ms out of range"
+        for r in rows:
+            lat_ms = r['latency_us'] / 1000
+            assert 2280 < lat_ms < 2320, f"latency {lat_ms} ms out of range"
 
     def test_sf7_lower_latency_than_sf12(self):
-        # Generate two datasets, one with SF7 and one with SF12
+        # SF7 round-trip is much shorter than SF12
         tx = (33.4255, -111.94)
         rx = [(33.43, -111.94), (33.44, -111.94), (33.45, -111.94)]
         random.seed(42)
@@ -431,22 +470,31 @@ class TestLatencyGeneration:
                                  915, 22, 2.15, 2.15, 1,
                                  1.5, datetime(2026, 6, 17, 14, 32, 0),
                                  sf=12, bw_khz=125)
-        lat7 = (rows7[0]['rx_gps_us'] - rows7[0]['tx_gps_us']) / 1000
-        lat12 = (rows12[0]['rx_gps_us'] - rows12[0]['tx_gps_us']) / 1000
+        lat7 = rows7[0]['latency_us']
+        lat12 = rows12[0]['latency_us']
         assert lat7 < lat12, f"SF7 latency {lat7} should be < SF12 {lat12}"
 
-    def test_tx_gps_us_uses_unix_epoch(self):
+    def test_latency_us_is_int(self):
         tx = (33.4255, -111.94)
         rx = [(33.43, -111.94)]
         random.seed(42)
         rows = g.generate_rows(rx, tx[0], tx[1],
                                915, 22, 2.15, 2.15, 1,
                                1.5, datetime(2026, 6, 17, 14, 32, 0))
-        # Unix-µs for 2026-06-17 14:32:00 UTC ≈ 1.78e15
+        assert isinstance(rows[0]['latency_us'], int)
+
+    def test_event_time_uses_unix_epoch(self):
+        tx = (33.4255, -111.94)
+        rx = [(33.43, -111.94)]
+        random.seed(42)
+        rows = g.generate_rows(rx, tx[0], tx[1],
+                               915, 22, 2.15, 2.15, 1,
+                               1.5, datetime(2026, 6, 17, 14, 32, 0))
+        # Unix seconds for 2026-06-17 14:32:00 UTC
         expected_base = int(datetime(2026, 6, 17, 14, 32, 0,
-                                      tzinfo=timezone.utc).timestamp() * 1_000_000)
-        # First row's tx_gps_us should be close to expected (within beacon interval)
-        assert abs(rows[0]['tx_gps_us'] - expected_base) < 1_000_000
+                                      tzinfo=timezone.utc).timestamp())
+        # First row's event_time should equal expected_base (pid=1 → offset 0)
+        assert rows[0]['event_time'] == expected_base
 
 
 # =========================================================================
@@ -514,18 +562,23 @@ class TestCsvFormat:
         rows = g.generate_rows(rx, tx[0], tx[1],
                                915, 22, 2.15, 2.15, 1,
                                1.5, datetime(2026, 6, 17, 14, 32, 0))
-        assert isinstance(rows[0]['lat_e7'], int)
-        assert isinstance(rows[0]['tx_lat_e7'], int)
-        assert isinstance(rows[0]['lng_e7'], int)
+        assert isinstance(rows[0]['rx_late7'], int)
+        assert isinstance(rows[0]['rx_lnge7'], int)
+        assert isinstance(rows[0]['tx_late7'], int)
+        assert isinstance(rows[0]['tx_lnge7'], int)
 
-    def test_rssi_is_float(self):
+    def test_rx_rssix10_is_int(self):
         tx = (33.4255, -111.94)
         rx = [(33.43, -111.94)]
         random.seed(42)
         rows = g.generate_rows(rx, tx[0], tx[1],
                                915, 22, 2.15, 2.15, 1,
                                1.5, datetime(2026, 6, 17, 14, 32, 0))
-        assert isinstance(rows[0]['rssi_dbm'], float)
+        # V2 stores RSSI/SNR as int ×10 (dBm×10 / dB×10), not float dBm
+        assert isinstance(rows[0]['rx_rssix10'], int)
+        assert isinstance(rows[0]['rx_snrx10'], int)
+        assert isinstance(rows[0]['tx_rssix10'], int)
+        assert isinstance(rows[0]['tx_snrx10'], int)
 
 
 # =========================================================================
@@ -568,7 +621,7 @@ class TestCsvParseableByRangeLib:
         return output.getvalue()
 
     def test_rows_parse(self):
-        """Generate a minimal CSV and verify Node can parse it via subprocess."""
+        """Generate a minimal V2 CSV and verify range-lib.js can parse it."""
         tx = (33.4255, -111.94)
         rx = [(33.43, -111.94), (33.44, -111.94), (33.45, -111.94)]
         random.seed(42)
@@ -577,14 +630,19 @@ class TestCsvParseableByRangeLib:
                                1.5, datetime(2026, 6, 17, 14, 32, 0))
         csv_text = self._write_csv_to_string(rows)
 
-        # Verify CSV structure matches range-lib expectations
+        # Verify CSV structure matches V2 range-lib expectations
         lines = csv_text.strip().split('\n')
         header = lines[0].lower()
-        assert 'tx_lat_e7' in header
-        assert 'tx_lng_e7' in header
-        assert 'lat_e7' in header
-        assert 'rssi_dbm' in header
+        assert 'tx_late7' in header
+        assert 'tx_lnge7' in header
+        assert 'rx_late7' in header
+        assert 'rx_lnge7' in header
+        assert 'rx_rssix10' in header
+        assert 'rx_snrx10' in header
         assert 'packet_id' in header
+        assert 'event_type' in header
+        assert 'packet_len' in header
+        assert 'latency_us' in header
         assert len(lines) - 1 == 3  # header + 3 data rows
 
     def test_known_distances(self):
@@ -597,8 +655,8 @@ class TestCsvParseableByRangeLib:
                                1.5, datetime(2026, 6, 17, 14, 32, 0))
         assert len(rows) == 1
         # Distance should be near 0
-        rx_lat = rows[0]['lat_e7'] / 1e7
-        rx_lng = rows[0]['lng_e7'] / 1e7
+        rx_lat = rows[0]['rx_late7'] / 1e7
+        rx_lng = rows[0]['rx_lnge7'] / 1e7
         d = g.haversine(rx_lat, rx_lng, tx[0], tx[1])
         assert d < 10  # within 10m due to GPS noise
 
@@ -611,14 +669,29 @@ class TestDefaults:
         assert abs(g.DEFAULT_TX_LAT - 33.4255) < 0.001
         assert abs(g.DEFAULT_TX_LNG - -111.94) < 0.001
 
-    def test_csv_header_has_all_required_fields(self):
+    def test_csv_header_has_all_required_v2_fields(self):
         fields = g.CSV_HEADER.split(',')
-        for f in ['lat_e7', 'lng_e7', 'tx_lat_e7', 'tx_lng_e7',
-                  'rssi_dbm', 'snr_db', 'packet_id', 'utc_iso',
-                  'tx_gps_us', 'rx_gps_us']:
-            assert f in fields
-        # event_time_us was removed
-        assert 'event_time_us' not in fields
+        for f in ['event_type', 'event_time', 'event_pps_micros',
+                  'node_id', 'target_id', 'packet_id',
+                  'rx_late7', 'rx_lnge7', 'rx_sats',
+                  'tx_late7', 'tx_lnge7', 'tx_sats',
+                  'rx_rssix10', 'rx_snrx10', 'tx_rssix10', 'tx_snrx10',
+                  'packet_len', 'latency_us']:
+            assert f in fields, f'{f} missing from V2 header'
+        # V1 columns were retired with the 22-byte beacon (see PACKET_FORMAT_V2.md §8)
+        for retired in ['tx_gps_us', 'rx_gps_us', 'rssi_dbm', 'snr_db',
+                        'lat_e7', 'lng_e7', 'tx_lat_e7', 'tx_lng_e7',
+                        'utc_iso', 'gps_fix_time_us', 'time_valid',
+                        'event_time_us']:
+            assert retired not in fields, f'{retired} must not be in V2 header'
+
+    def test_v2_wire_constants(self):
+        assert g.SFTRK_FLAG_GPS_VALID == 0x10
+        assert g.SFTRK_FLAG_GPS_INVALID == 0x20
+        assert g.LOCATION_PACKET_LEN == 23
+        assert g.REQ_LOG_LEN == 6
+        assert g.DEFAULT_NODE_ID == 2
+        assert g.DEFAULT_TARGET_ID == 1
 
     def test_presets_exist(self):
         for name in ('minimal', 'gaps', 'nofix', 'realistic_short', 'realistic_long'):

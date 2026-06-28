@@ -325,7 +325,7 @@ small.note{color:#7a7090}
         <div class="panel2 panel"><div class="chart-head"><h3>SNR vs distance</h3><button class="ghost mini" data-png="chSnr" aria-label="Export SNR chart as PNG">PNG</button></div><canvas id="chSnr" height="220"></canvas></div>
         <div class="panel2 panel"><div class="chart-head"><h3>Latency vs distance</h3><button class="ghost mini" data-png="chLat" aria-label="Export latency chart as PNG">PNG</button></div><canvas id="chLat" height="220"></canvas></div>
       </div>
-      <small class="note" style="display:block;margin-top:.4rem">Latency = (rx_gps_us − tx_gps_us) / 1000. Requires GPS-PPS-synced timestamps in the CSV.</small>
+      <small class="note" style="display:block;margin-top:.4rem">Latency = latency_us / 1000 (round-trip µs: REQ_LOG TX_DONE → LocationPacket RX_DONE, local micros). Legacy V1 logs use (rx_gps_us − tx_gps_us) / 1000 via BigInt.</small>
 
       <!-- compare panel (>=2 sessions) -->
       <div class="panel cmp" id="comparePanel" style="display:none">
@@ -496,32 +496,36 @@ small.note{color:#7a7090}
 
   <section class="sub" id="how">
     <h2>Range Testing Overview</h2>
-    <p class="lead">Two identical radios. One transmits GPS-stamped beacon packets on a fixed cadence;
-    the other receives them, measures signal quality (RSSI / SNR), and logs both ends' positions to its
-    microSD card. Drive or walk the nodes apart until the link breaks. The farthest distance still
-    delivering good packets is the measured range.</p>
+    <p class="lead">Two identical radios. The requester (nice!nano) sends a <code>REQ_LOG</code> on a button
+    press; the responder (tx_test) replies with a <code>LocationPacket</code> carrying its GPS fix plus the
+    RSSI/SNR it measured on the request. The requester logs both ends' positions and both halves of the
+    link budget to its microSD card. Drive or walk the nodes apart until the link breaks. The farthest
+    distance still delivering good packets is the measured range.</p>
 
     <div class="grid cols2">
       <div class="panel">
         <h3>Roles</h3>
         <table>
           <tr><th>Node</th><th>Job</th></tr>
-          <tr><td class="mono">TX (beacon)</td><td>Every <em>T</em> seconds, sample its GPS, build a
-            packet <b>containing its own lat/lng + a monotonic packet_id</b>, transmit.</td></tr>
-          <tr><td class="mono">RX (logger)</td><td>On each received packet: read RSSI &amp; SNR, sample
-            its <em>own</em> GPS, parse the TX's GPS out of the payload, write one CSV row. Missing
-            packet_ids = losses.</td></tr>
+          <tr><td class="mono">Requester / Logger<br>(nicenano, NODE_ID=1)</td><td>On button press, sends
+            <code>REQ_LOG</code> addressed to the responder. On receiving a <code>LocationPacket</code>,
+            measures return-path RSSI/SNR, snapshots its own GPS, and writes one CSV row. Missing
+            <code>packet_id</code>s = losses.</td></tr>
+          <tr><td class="mono">Responder / Beacon<br>(tx_test, NODE_ID=2)</td><td>Continuously in RX. On a
+            <code>REQ_LOG</code> whose <code>targetId</code> matches, measures forward-path RSSI/SNR,
+            snapshots its GPS, builds a <code>LocationPacket</code>, transmits.</td></tr>
         </table>
-        <p class="muted">Both ends run the same firmware; <code>NODE_ID</code> + a runtime role flag pick
-        TX vs RX. Either node can be the static "base"; the other roves.</p>
+        <p class="muted">Role is fixed at build time by the PlatformIO env (<code>nicenano</code> vs
+        <code>tx_test</code>) and the <code>NODE_ID</code>/<code>TARGET_ID</code> build flags in
+        <code>platformio.ini</code>.</p>
       </div>
 
       <div class="panel">
         <h3>Why GPS lives in the payload</h3>
-        <p>Range = distance between the <b>two antennas at the instant of the packet</b>. Putting the TX
-        position inside the payload means a <b>single RX log file is self-sufficient</b>: every row already
-        has both endpoints (RX GPS from the local module, TX GPS from the payload). No clock-syncing two
-        logs, no post-hoc GPX join.</p>
+        <p>Range = distance between the <b>two antennas at the instant of the transaction</b>. The responder
+        puts its lat/lng inside the <code>LocationPacket</code>, so a <b>single RX log file is
+        self-sufficient</b>: every row already has both endpoints (RX GPS from the local module, TX GPS from
+        the payload). No clock-syncing two logs, no post-hoc GPX join.</p>
       </div>
     </div>
 
@@ -546,13 +550,14 @@ small.note{color:#7a7090}
           <code>sleep()</code> it (NSS high → MISO Hi-Z) before SD I/O.</p>
         </div>
       </div>
-      <div class="callout gap">
-        <b>Firmware gap (intended vs current).</b> The payload-GPS design above requires the TX coordinates
-        to be parsed from the packet and written as extra CSV columns
-        (<code>tx_lat_e7</code>, <code>tx_lng_e7</code>). Current <code>src/main.cpp</code> defines a
-        single-GPS header and its <code>logQueue</code> consumer isn't wired yet — the log processor
-        therefore <b>also accepts a single-GPS CSV plus a fixed "reference point"</b> so you can test the
-        tooling before the firmware catches up.
+      <div class="callout info">
+        <b>Firmware status.</b> <code>src/main.cpp</code> (requester) writes the full V2 18-column row —
+        identity block (<code>node_id</code>, <code>target_id</code>, <code>packet_id</code>), split
+        <code>rx_*</code>/<code>tx_*</code> GPS, both halves of the link budget
+        (<code>rx_rssix10</code>/<code>tx_rssix10</code>), and <code>latency_us</code> (round-trip µs from
+        radio IRQ timestamps, no GPS-PPS needed). <code>event_pps_micros</code> is reserved (always 0
+        until the PPS ISR latches <code>lastPpsMicros</code>). The log processor also accepts a legacy V1
+        single-GPS CSV plus a fixed <em>reference point</em> so old logs still load.
       </div>
     </div>
   </section>
@@ -564,29 +569,45 @@ small.note{color:#7a7090}
 
     <div class="grid cols2">
       <div class="panel">
-        <h3>Beacon payload (TX → air)</h3>
-        <p class="muted">Compact fixed layout — carries TX position and GPS-PPS-synced timestamp so the RX side can compute latency.</p>
-        <pre>struct Beacon {        // 22 bytes
-  uint8_t  node_id;    // who sent it
-  uint32_t packet_id;  // monotonic, for loss detection
-  int32_t  lat_e7;     // TX latitude  × 1e7
-  int32_t  lng_e7;     // TX longitude × 1e7
-  uint64_t tx_gps_us;  // TX GPS-synced Unix time, µs (since epoch)
-  uint8_t  flags;      // fix-valid, sats bucket, ...
+        <h3>Wire packets (request / response)</h3>
+        <p class="muted">V2 is a two-step transaction, not a one-way beacon. The requester sends a 6-byte
+        <code>REQ_LOG</code>; the responder replies with a 23-byte <code>LocationPacket</code> carrying its
+        GPS fix and the RSSI/SNR it measured on the request.</p>
+        <pre>struct Header {          // 6 bytes — prefix of every packet
+  uint8_t  magic;       // 0x56 (SFTRK_MAGIC)
+  uint8_t  flag;        // sftrk_flag_t: 0x30 REQ_LOG · 0x40 ACK · 0x10/0x20 GPS_VALID/INVALID
+  uint16_t nodeId;      // sender
+  uint16_t targetId;    // intended recipient
+};
+struct AckPacket {       // 6 bytes (Header only) — carries REQ_LOG / ACK
+  struct Header header;
+};
+struct LocationPacket {  // 23 bytes — responder → requester
+  struct Header header;
+  int16_t  rx_rssi;       // / 10  (dBm×10, responder's RX of REQ_LOG)
+  int16_t  rx_snr;        // / 10  (dB×10)
+  bool     gps_fix;
+  int32_t  gps_lng;       // × 1e7
+  int32_t  gps_lat;       // × 1e7
+  uint8_t  gps_numSat;
+  uint8_t  gps_avgGsvSnr; // reserved (0)
+  uint16_t packet_id;     // monotonic from responder
 };</pre>
-        <small class="note">lat/lng as int32 ×1e7 ≈ 1.1&nbsp;cm resolution, no float on the wire. See <code>docs/PACKET_FORMAT.md</code> for full details.</small>
+        <small class="note">All structs <code>__attribute__((packed))</code>, little-endian. lat/lng as int32 ×1e7 ≈ 1.1&nbsp;cm resolution, no float on the wire. See <code>docs/PACKET_FORMAT_V2.md</code> for full details.</small>
       </div>
 
       <div class="panel">
         <h3>RX CSV row (logger → SD)</h3>
-        <p class="muted">Header written once per file. One row per received packet. GPS-PPS-synced timestamps enable latency measurement.</p>
-        <pre>time_valid,utc_iso,event_type,node_id,packet_id,
-rx_lat_e7,rx_lng_e7,          // local GPS (logger)
-tx_lat_e7,tx_lng_e7,          // from payload (beacon)
-gps_fix_time_us,rssi_dbm,snr_db,
-tx_gps_us,rx_gps_us           // GPS-synced Unix µs — latency = (rx − tx) / 1000</pre>
-        <small class="note">Filenames <code>N{node}_{seq}.csv</code> (e.g. <code>N02_0007.csv</code>),
-        sequential, never overwritten. See <code>docs/PACKET_FORMAT.md</code> for full spec.</small>
+        <p class="muted">Header written once per file. One row per received <code>LocationPacket</code>. RSSI/SNR stored ×10 (int) to avoid float on the MCU; the processor divides by 10 for display.</p>
+        <pre>event_type,event_time,event_pps_micros,node_id,target_id,packet_id,
+rx_late7,rx_lnge7,rx_sats,         // logger GPS (requester)
+tx_late7,tx_lnge7,tx_sats,         // responder GPS (from LocationPacket)
+rx_rssix10,rx_snrx10,              // requester's RX of LocationPacket (return path)
+tx_rssix10,tx_snrx10,              // responder's RX of REQ_LOG (forward path)
+packet_len,                        // 23
+latency_us                         // round-trip µs (REQ_LOG TX_DONE → LocationPacket RX_DONE)</pre>
+        <small class="note">Filenames <code>N{node}_{seq}.csv</code> (e.g. <code>N01_0019.csv</code>),
+        sequential, never overwritten. See <code>docs/PACKET_FORMAT_V2.md</code> for full spec.</small>
       </div>
     </div>
 
