@@ -446,7 +446,7 @@ void lora_handleRx(void* parameter){
 	}
 }
 
-void handle_location(const struct LocationPacket* loc, bool valid, int16_t rssi, int16_t snrX10, uint32_t rxIrqMicros){
+void handle_location(const struct LocationPacket* loc, bool valid, int16_t rssix10, int16_t snrX10, uint32_t rxIrqMicros){
     LogEvent log = {};
 
 	if(valid) {
@@ -478,7 +478,7 @@ void handle_location(const struct LocationPacket* loc, bool valid, int16_t rssi,
 	log.tx_late7 = loc->gps_lat;
 	log.tx_lnge7 = loc->gps_lng;
 	log.tx_sats = loc->gps_numSat;
-	log.rx_rssix10 = rssi;
+	log.rx_rssix10 = rssix10;
 	log.rx_snrx10 = snrX10;
 	log.tx_rssix10 = loc->rx_rssi;
 	log.tx_snrx10 = loc->rx_snr;
@@ -502,7 +502,7 @@ void handle_ack(const struct AckPacket* ack){
 void handleRxDone(uint32_t irqMicros) {
     // Read packet and metadata outside ISR
 	size_t rxLen = radio.getPacketLength();
-    int16_t rssi = radio.getRSSI();
+    float rssi = radio.getRSSI();
     float snrFloat = radio.getSNR();
     int state = radio.readData(rxBuffer, rxLen);
 	
@@ -531,10 +531,10 @@ void handleRxDone(uint32_t irqMicros) {
 			rejectedForeign++;
 			return;
 		case SFTRK_FLAG_GPS_VALID:
-			handle_location((const struct LocationPacket*)rxBuffer, true, rssi, (int16_t)round(snrFloat * 10), irqMicros);
+			handle_location((const struct LocationPacket*)rxBuffer, true, (int16_t)round(rssi * 10), (int16_t)round(snrFloat * 10), irqMicros);
 			break;
 		case SFTRK_FLAG_GPS_INVALID:
-			handle_location((const struct LocationPacket*)rxBuffer, false, rssi, (int16_t)round(snrFloat * 10), irqMicros);
+			handle_location((const struct LocationPacket*)rxBuffer, false, (int16_t)round(rssi * 10), (int16_t)round(snrFloat * 10), irqMicros);
 			break;
 		case SFTRK_FLAG_ACK:
 			handle_ack((const struct AckPacket*)rxBuffer);

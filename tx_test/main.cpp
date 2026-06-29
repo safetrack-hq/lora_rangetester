@@ -83,7 +83,7 @@ struct RadioIrqEvent {
 
 struct PongReq {
 	uint16_t reqNodeId;
-	int16_t  rssi;
+	int16_t  rssix10;
 	int16_t  snrX10;
 };
 
@@ -148,11 +148,11 @@ void onRadioDio1(void){
 
 void handleRxDone(uint32_t irqMicros){
 	size_t rxLen = radio.getPacketLength();
-	int16_t rssi = radio.getRSSI();
+	float rssi = radio.getRSSI();
 	float snrFloat = radio.getSNR();
 	int state = radio.readData(rxBuffer, rxLen);
 
-	Serial.printf("[RX] len=%u rssi=%d snr=%.1f\n", rxLen, rssi, snrFloat);
+	Serial.printf("[RX] len=%u rssi=%.1f snr=%.1f\n", rxLen, rssi, snrFloat);
 
 	if(rxLen == 0 || rxLen > sizeof(rxBuffer)){
 		rejectedBadLength++;
@@ -208,15 +208,15 @@ void handleRxDone(uint32_t irqMicros){
 
 	struct PongReq req;
 	req.reqNodeId = h->nodeId;
-	req.rssi = rssi;
+	req.rssix10 = (int16_t)round(rssi * 10);
 	req.snrX10 = (int16_t)round(snrFloat * 10);
 
 	if(xQueueSend(txPongQueue, &req, 0) != pdTRUE){
 		Serial.println("[RX] WARN: txPongQueue full, dropping pong");
 		radio.startReceive();
 	} else {
-		Serial.printf("[RX] queued pong reqNode=%u rssi=%d snrX10=%d\n",
-			req.reqNodeId, req.rssi, req.snrX10);
+		Serial.printf("[RX] queued pong reqNode=%u rssix10=%d snrX10=%d\n",
+			req.reqNodeId, req.rssix10, req.snrX10);
 	}
 	// do NOT startReceive on accept path; txPongTask will startTransmit next,
 	// and TX_DONE handler will return us to RX.
@@ -271,7 +271,7 @@ void txPongTask(void* parameter){
 			(uint16_t)NODE_ID,
 			req.reqNodeId,
 			fix.valid,
-			req.rssi,
+			req.rssix10,
 			req.snrX10,
 			fix.valid ? fix.lng_E7 : 0,
 			fix.valid ? fix.lat_E7 : 0,
